@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-dotenv
+openai
+python-multipart
+pypdf
+pandas
+openpyxl
+numpy
+sqlalchemy>=2.0
+pydantic-settings
+tiktoken
+python-json-logger
+reportlab
+python-docx

@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="pt-br">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <!-- DEV: avoid stale cached JS/CSS while iterating -->
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>PayTech AI</title>
+  <link rel="icon" id="appFavicon" href="./assets/pay.png" />
+
+  <!-- Inter (UI) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" />
+
+  <link rel="stylesheet" href="style.css?v=20260210_009" />
+
+  <!-- Material Symbols Outlined -->
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+
+  <!-- Markdown + sanitize (leves, produção) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+</head>
+
+<body>
+  <div class="app" id="app">
+
+    <!-- Sidebar (ChatGPT-like) -->
+    <aside class="sidebar" id="sidebar" aria-label="Conversas">
+      <div class="sb-header">
+        <button class="sb-logo" id="sidebarLogo" type="button" aria-label="Alternar sidebar" title="Alternar sidebar"
+          data-tooltip="Alternar sidebar">
+          <img src="./assets/pay.png" alt="" />
+        </button>
+        <div class="sb-title" title="PayTech AI Assistant">PayTech AI Assistant</div>
+        <div class="sb-spacer" aria-hidden="true"></div>
+      </div>
+
+      <div class="sb-actions">
+        <button class="btn subtle novo-chat" id="newChat" type="button" title="Novo chat" aria-label="Novo chat"
+          data-tooltip="Novo chat">
+          <span class="ms" aria-hidden="true">edit_square</span>
+          <span>Novo chat</span>
+        </button>
+
+        <button class="btn subtle" id="downloadBtn" type="button" title="Download (Documentos)"
+          aria-label="Abrir biblioteca de documentos" data-tooltip="Downloads">
+          <span class="ms" aria-hidden="true">download</span>
+          <span>Download</span>
+        </button>
+
+        <button class="btn subtle search-btn" id="searchBtn" type="button" title="Buscar" aria-label="Buscar"
+          data-tooltip="Buscar">
+          <span class="ms" aria-hidden="true">search</span>
+          <span>Buscar</span>
+        </button>
+      </div>
+
+      <div class="sb-search">
+        <span class="ms search-ico" aria-hidden="true">search</span>
+        <input id="searchInput" type="search" placeholder="Buscar" autocomplete="off" />
+      </div>
+
+      <nav class="sb-list" id="conversationList" aria-label="Lista de conversas" role="listbox"></nav>
+    </aside>
+
+    <!-- Mobile overlay -->
+    <div class="overlay" id="overlay" hidden></div>
+
+    <!-- Main -->
+    <main class="main" aria-label="Chat">
+      <header class="topbar">
+        <button class="icon-btn" id="sidebarToggle" type="button" aria-label="Alternar sidebar"
+          title="Alternar sidebar">
+          <span class="ms" aria-hidden="true">dock_to_left</span>
+        </button>
+
+        <div class="topbar-title">
+          <div class="title" id="currentTitle"></div>
+          <div class="subtitle" id="currentSub">Pronto</div>
+        </div>
+
+        <div class="topbar-actions">
+          <button class="icon-btn" id="responseModeBtn" type="button" aria-label="Modo de resposta"
+            title="Modo de resposta">
+            <span class="ms" aria-hidden="true">tune</span>
+          </button>
+          <button class="icon-btn theme-btn" id="themeToggle" type="button" aria-label="Alternar tema"
+            title="Alternar tema">
+            <span class="ms" aria-hidden="true">dark_mode</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Empty state (home) -->
+      <section class="empty-state" id="emptyState" aria-label="Início" hidden>
+        <div class="empty-inner">
+          <h1 class="empty-title">Olá. Como posso ajudar você hoje?</h1>
+          <p class="empty-sub">Pergunte qualquer coisa.</p>
+
+          <div class="suggestions" id="emptySuggestions" role="list" aria-label="Sugestões">
+            <button class="pill" type="button" data-suggest="Criar resumo" role="listitem">Criar resumo</button>
+            <button class="pill" type="button" data-suggest="Analisar documento" role="listitem">Analisar
+              documento</button>
+            <button class="pill" type="button" data-suggest="Gerar relatório" role="listitem">Gerar relatório</button>
+            <button class="pill" type="button" data-suggest="Resolver dúvida" role="listitem">Resolver dúvida</button>
+          </div>
+
+          <div class="empty-composer" role="group" aria-label="Nova pergunta">
+            <textarea id="emptyInput" rows="2" placeholder="Pergunte alguma coisa" autocomplete="off"></textarea>
+            <button class="icon-btn primary" id="emptySendBtn" type="button" aria-label="Enviar" title="Enviar">
+              <span class="ms" aria-hidden="true">arrow_upward</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="chat" id="chat" aria-live="polite">
+        <div class="thread" id="thread"></div>
+      </section>
+
+      <button class="to-bottom" id="toBottomBtn" type="button" aria-label="Voltar ao fim" title="Voltar ao fim" hidden>
+        <span class="ms" aria-hidden="true">arrow_downward</span>
+        <span>Voltar ao fim</span>
+      </button>
+
+      <footer class="composer" aria-label="Composer">
+        <div class="composer-inner">
+          <div class="chips" id="fileChips" hidden></div>
+
+          <div class="composer-row">
+            <button class="icon-btn circle" id="attachBtn" type="button" aria-label="Anexar arquivo" title="Anexar">
+              <span class="ms" aria-hidden="true">add</span>
+            </button>
+
+            <textarea id="input" rows="1" placeholder="Pergunte alguma coisa" autocomplete="off"></textarea>
+
+            <div class="action-slot">
+              <button class="icon-btn primary action-btn" id="sendBtn" type="button" aria-label="Enviar" title="Enviar">
+                <span class="ms" aria-hidden="true">arrow_upward</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <input id="fileInput" type="file" multiple hidden />
+      </footer>
+    </main>
+  </div>
+
+  <!-- Menus / Toast -->
+  <div class="menu" id="itemMenu" role="menu" aria-label="Menu de conversa" hidden></div>
+  <div class="menu" id="exportMenu" role="menu" aria-label="Baixar conversa" hidden></div>
+  <div class="menu" id="modeMenu" role="menu" aria-label="Modo de resposta" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <!-- Downloads Panel -->
+  <section class="modal" id="downloadsPanel" aria-label="Biblioteca de documentos" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <div class="modal-title">Downloads</div>
+        <button class="icon-btn" id="downloadsClose" type="button" aria-label="Fechar" title="Fechar">
+          <span class="ms" aria-hidden="true">close</span>
+        </button>
+      </header>
+
+      <div class="modal-body">
+        <div class="dl-toolbar">
+          <button class="btn accent" id="downloadsUploadBtn" type="button" title="Adicionar documentos">
+            <span class="ms" aria-hidden="true">upload</span>
+            <span>Adicionar documentos</span>
+          </button>
+          <label class="dl-toggle">
+            <input type="checkbox" id="downloadsUseToggle" />
+            <span>Usar documentos nas respostas</span>
+          </label>
+        </div>
+
+        <div class="dl-search">
+          <input id="downloadsSearchInput" type="search" placeholder="Buscar nos documentos..." autocomplete="off" />
+          <button class="icon-btn" id="downloadsSearchBtn" type="button" aria-label="Buscar" title="Buscar">
+            <span class="ms" aria-hidden="true">search</span>
+          </button>
+        </div>
+
+        <div class="dl-grid">
+          <section class="dl-col" aria-label="Arquivos">
+            <div class="dl-col-title">Arquivos</div>
+            <div class="dl-list" id="downloadsList"></div>
+          </section>
+
+          <section class="dl-col" aria-label="Resultados">
+            <div class="dl-col-title">Resultados</div>
+            <div class="dl-results" id="downloadsResults"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <input id="downloadsFileInput" type="file" multiple accept=".pdf,.xlsx,.csv,.txt,text/plain,application/pdf"
+      hidden />
+  </section>
+
+  <script defer src="app.js?v=20260210_009"></script>
+</body>
+
+</html>

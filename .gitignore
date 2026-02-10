@@ -1,0 +1,68 @@
+# =============================
+# Python / FastAPI
+# =============================
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtualenvs (never commit)
+.venv/
+venv/
+ENV/
+env/
+**/.venv/
+**/venv/
+
+# =============================
+# Node / Frontend tooling
+# =============================
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+
+# =============================
+# IDE / OS
+# =============================
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =============================
+# Secrets / Credentials (never commit)
+# =============================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+
+# =============================
+# Local data / artifacts (RAG, uploads, exports, logs, DBs)
+# =============================
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# PayTechAI_Senior backend runtime folders
+PayTechAI_Assistant/PayTechAI_Senior/backend/data/
+PayTechAI_Assistant/PayTechAI_Senior/backend/logs/
+PayTechAI_Assistant/PayTechAI_Senior/backend/storage/
+
+backend/data/*
+!backend/data/.gitkeep
