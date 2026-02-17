@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from settings import settings
+from ..settings import settings
 
 try:
     import tiktoken  # type: ignore

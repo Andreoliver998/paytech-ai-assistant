@@ -16,7 +16,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" />
 
-  <link rel="stylesheet" href="style.css?v=20260210_009" />
+  <link rel="stylesheet" href="style.css?v=20260210_023" />
 
   <!-- Material Symbols Outlined -->
   <link rel="stylesheet"
@@ -25,6 +25,12 @@
   <!-- Markdown + sanitize (leves, produção) -->
   <script defer src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+
+  <!-- Early diagnostics stub: allows DevTools commands before `app.js` finishes loading. -->
+  <script>
+    window.__paytech = window.__paytech || {};
+    window._paytech = window.__paytech;
+  </script>
 </head>
 
 <body>
@@ -126,7 +132,6 @@
 
       <button class="to-bottom" id="toBottomBtn" type="button" aria-label="Voltar ao fim" title="Voltar ao fim" hidden>
         <span class="ms" aria-hidden="true">arrow_downward</span>
-        <span>Voltar ao fim</span>
       </button>
 
       <footer class="composer" aria-label="Composer">
@@ -206,7 +211,8 @@
       hidden />
   </section>
 
-  <script defer src="app.js?v=20260210_009"></script>
+  <script defer src="app.js?v=20260210_025"></script>
+
 </body>
 
 </html>

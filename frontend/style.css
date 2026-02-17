@@ -1003,7 +1003,8 @@ textarea#input:focus-visible{ outline: none !important; }
   padding: var(--space-12) var(--space-12);
   font-size: 13px;
   box-shadow: var(--shadow);
-  z-index: 80;
+  /* Must be above modals/overlays so users always see the reason an action was blocked. */
+  z-index: 200;
 }
 
 /* ===== Modal (Downloads) ===== */

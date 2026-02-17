@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Tuple
 
 from sqlalchemy.orm import Session
 
-from models import DownloadChunkDB, DownloadChunkMetaDB, DownloadFileDB
-from services.openai_service import cosine_similarity, embed_texts
-from services.rag_service import extract_csv_text, extract_pdf_text, extract_xlsx_text, split_text_tokens
-from settings import settings
+from ..models import DownloadChunkDB, DownloadChunkMetaDB, DownloadFileDB
+from .openai_service import cosine_similarity, embed_texts
+from .rag_service import extract_csv_text, extract_pdf_text, extract_xlsx_text, split_text_tokens
+from ..settings import settings
 
 
 ALLOWED_EXTS = {"pdf", "xlsx", "csv", "txt"}

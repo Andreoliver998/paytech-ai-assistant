@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from sqlalchemy.orm import Session
 
-from models import UserMemoryDB
+from ..models import UserMemoryDB
 
 
 def _safe_json_loads(s: str) -> Dict[str, Any]:
@@ -60,4 +60,3 @@ def upsert_preferences(db: Session, user_id: str, patch: Dict[str, Any]) -> Dict
     row.updatedAt = now
     db.commit()
     return prefs
-

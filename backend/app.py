@@ -4,10 +4,14 @@ import re
 import uuid
 import json
 import mimetypes
+import logging
+import time
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import concurrent.futures
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,17 +20,17 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from db import Base, engine, get_db
-from models import DownloadChunkDB, DownloadFileDB, FileDB, KBChunkDB, MessageDB, SessionDB
-from services.openai_service import gerar_resposta, gerar_resposta_stream
-from services.downloads_service import list_downloads, search_downloads
-from services.memory_service import get_preferences, upsert_preferences
-from services.title_service import generate_conversation_title
-from services.llm_planner import plan_next_action
-from services.tool_runner import run_tools
-from services.verifier import verify_and_fix
-from services.memory_store import get_user_prefs, recall_user_prefs, upsert_thread_meta, upsert_user_pref
-from services.rag_service import (
+from .db import Base, engine, get_db
+from .models import DownloadChunkDB, DownloadFileDB, FileDB, KBChunkDB, MessageDB, SessionDB
+from .services.openai_service import gerar_resposta, gerar_resposta_stream, get_client
+from .services.downloads_service import list_downloads, search_downloads
+from .services.memory_service import get_preferences, upsert_preferences
+from .services.title_service import generate_conversation_title
+from .services.llm_planner import plan_next_action
+from .services.tool_runner import run_tools
+from .services.verifier import verify_and_fix
+from .services.memory_store import get_user_prefs, recall_user_prefs, upsert_thread_meta, upsert_user_pref
+from .services.rag_service import (
     build_rag_system_prompt,
     extract_csv_text,
     extract_pdf_text,
@@ -34,11 +38,11 @@ from services.rag_service import (
     index_file_and_save,
     retrieve_context,
 )
-from settings import settings
-from utils.files import DATA_DIR, UPLOADS_DIR, KB_FILE
-from utils.text import sanitize_and_trim_messages
-from routers.downloads_router import router as downloads_router
-from routers.export_router import router as export_router
+from .settings import settings, validate_openai_settings, openai_settings_hint, ENV_FILE_USED
+from .utils.files import DATA_DIR, UPLOADS_DIR, KB_FILE
+from .utils.text import sanitize_and_trim_messages
+from .routers.downloads_router import router as downloads_router
+from .routers.export_router import router as export_router
 
 # Exports (artifacts)
 EXPORTS_DIR = Path(__file__).resolve().parent / "storage" / "exports"
@@ -55,7 +59,25 @@ _TOOLS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_na
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="PayTechAI (Senior)")
+_startup_logger = logging.getLogger("paytechai.startup")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings.log_config_summary(_startup_logger)
+    hint = openai_settings_hint(settings)
+    if hint:
+        if (settings.ENV or "").strip().lower() == "dev":
+            _startup_logger.warning(
+                "OpenAI não configurado; endpoints /chat e /chat/stream podem falhar. Configure OPENAI_API_KEY no .env. env_file_used=%s",
+                str(ENV_FILE_USED),
+            )
+        else:
+            validate_openai_settings(settings)
+    yield
+
+
+app = FastAPI(title="PayTechAI (Senior)", lifespan=lifespan)
 
 # Frontend asset (for favicon fallback when opening backend base URL)
 FRONTEND_FAVICON = (Path(__file__).resolve().parent.parent / "frontend" / "assets" / "pay.png")
@@ -82,7 +104,9 @@ app.add_middleware(
     ),
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
+    # We don't use cookies/auth headers for this app; keeping credentials disabled
+    # simplifies CORS semantics and avoids edge cases with streaming.
+    allow_credentials=False,
 )
 
 
@@ -107,8 +131,8 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     thread_id: Optional[str] = None
     response_mode: Optional[str] = None
-    use_downloads: bool = False
-    downloads_top_k: int = 6
+    use_downloads: Optional[bool] = None
+    downloads_top_k: Optional[int] = None
 
 
 class SummarizeRequest(BaseModel):
@@ -223,8 +247,53 @@ def _format_downloads_list_markdown(items: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _did_user_request_sources(user_text: Optional[str]) -> bool:
+    t = re.sub(r"\s+", " ", (user_text or "").strip().lower())
+    if not t:
+        return False
+
+    explicit_markers = (
+        "fonte",
+        "fontes",
+        "de onde veio",
+        "qual documento",
+        "quais documentos",
+        "referência",
+        "referencias",
+        "referências",
+        "cite",
+        "mostrar fontes",
+        "listar fontes",
+    )
+    return any(m in t for m in explicit_markers)
+
+
 def _temperature(use_kb: bool) -> float:
     return float(settings.TEMPERATURE_RAG if use_kb else settings.TEMPERATURE_GENERAL)
+
+
+def _normalize_downloads_top_k(value: Optional[int]) -> int:
+    fallback = max(1, int(settings.RAG_TOP_K or 6))
+    try:
+        k = int(value if value is not None else fallback)
+    except Exception:
+        return fallback
+    return min(20, max(1, k))
+
+
+def _resolve_use_downloads(
+    requested: Optional[bool],
+    pref_value: bool,
+    last_user: Optional[str],
+) -> bool:
+    # Explicit user choice always wins.
+    if requested is True:
+        return True
+    if requested is False:
+        return False
+    # Otherwise, rely on persistent preference, then heuristic trigger.
+    return bool(pref_value) or _should_use_downloads(last_user)
+
 
 def _normalize_response_mode(mode: Optional[str]) -> str:
     m = (mode or "").strip().lower()
@@ -266,6 +335,33 @@ def _memory_system_prompt(prefs: Dict[str, Any]) -> Optional[str]:
 def health():
     return {"status": "ok", "env": settings.ENV}
 
+@app.options("/chat/stream")
+def chat_stream_options():
+    # Explicit preflight handler (defensive): if a request reaches routing (e.g. missing
+    # preflight headers), we still respond cleanly. CORSMiddleware will add CORS headers.
+    return Response(status_code=204)
+
+@app.options("/chat")
+def chat_options():
+    return Response(status_code=204)
+
+
+@app.get("/health/openai")
+def health_openai():
+    try:
+        client = get_client()
+        models = client.models.list()
+        data = getattr(models, "data", None) or []
+        first = (data[0].id if data else None)
+        return {
+            "status": "ok",
+            "openai": "ok",
+            "model_count": len(data),
+            "first_model": first,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"OpenAI healthcheck failed: {e}")
+
 @app.get("/")
 def root():
     return {
@@ -293,7 +389,9 @@ def api_health():
 @app.get("/config-check")
 def config_check():
     return {
-        "api_key_loaded": bool(settings.OPENAI_API_KEY),
+        "api_key_loaded": settings.openai_api_key_loaded(),
+        "api_key_fingerprint": settings.openai_api_key_fingerprint() if settings.openai_api_key_loaded() else "",
+        "env_file_used": str(ENV_FILE_USED),
         "model": settings.OPENAI_MODEL,
         "embed_model": settings.OPENAI_EMBED_MODEL,
         "data_dir": str(DATA_DIR),
@@ -332,6 +430,54 @@ def debug_paths():
         "UPLOADS_DIR": str(UPLOADS_DIR),
         "KB_FILE": str(KB_FILE),
     }
+
+
+# =========================================================
+# Debug: deterministic SSE stream (for frontend validation)
+# =========================================================
+@app.get("/debug/stream")
+@app.post("/debug/stream")
+def debug_stream():
+    """
+    Deterministic SSE stream used to validate the frontend SSE parser + incremental rendering.
+
+    Enable explicitly (never on by default):
+      - Set DEBUG_STREAM=true in .env
+    """
+    if not bool(getattr(settings, "DEBUG_STREAM", False)):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    def _sse(event: str, data: Any) -> str:
+        payload_str = json.dumps(data, ensure_ascii=False) if isinstance(data, (dict, list)) else str(data)
+        return f"event: {event}\ndata: {payload_str}\n\n"
+
+    def token_generator():
+        try:
+            yield _sse("status", {"phase": "thinking", "ts": datetime.now().isoformat(timespec="seconds"), "debug": True})
+            time.sleep(0.15)
+            yield _sse("status", {"phase": "answer", "debug": True})
+            time.sleep(0.10)
+            yield _sse("delta", {"text": "A"})
+            time.sleep(0.10)
+            yield _sse("delta", {"text": "B"})
+            time.sleep(0.10)
+            yield _sse("delta", {"text": "C"})
+            time.sleep(0.10)
+            yield _sse("status", {"phase": "done", "debug": True})
+        except (GeneratorExit, asyncio.CancelledError):
+            return
+        except Exception as e:
+            yield _sse("status", {"phase": "error", "message": str(e), "debug": True})
+
+    return StreamingResponse(
+        token_generator(),
+        media_type="text/event-stream; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # =========================================================
@@ -760,6 +906,10 @@ def documents_summarize_api(doc_id: str, payload: DocumentSummarizeRequest, db: 
 # =========================================================
 @app.post("/chat")
 def chat(payload: ChatRequest, db: Session = Depends(get_db)):
+    hint = openai_settings_hint(settings)
+    if hint:
+        raise HTTPException(status_code=503, detail=hint)
+
     try:
         trimmed = sanitize_and_trim_messages(payload.messages)
 
@@ -781,7 +931,7 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                     "context_used": 0,
                     "model": settings.OPENAI_MODEL,
                     "use_kb": False,
-                    "use_downloads": True,
+                    "use_downloads": False,
                     "response_mode": _normalize_response_mode(payload.response_mode),
                     "saved_to_db": bool(payload.session_id),
                     "fast_path": "list_downloads",
@@ -792,37 +942,64 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
         prefs = get_preferences(db, payload.user_id or "") if payload.user_id else {}
         mode = _normalize_response_mode(payload.response_mode or (prefs.get("response_mode") if isinstance(prefs, dict) else None))
 
-        use_downloads_pref = bool(prefs.get("use_downloads")) if isinstance(prefs, dict) else False
-        use_downloads = bool(payload.use_downloads) or use_downloads_pref or _should_use_downloads(last_user)
+        use_downloads_pref = bool(prefs.get("use_downloads")) if isinstance(prefs, dict) and prefs.get("use_downloads") in (True, False) else False
+        use_downloads = _resolve_use_downloads(payload.use_downloads, use_downloads_pref, last_user)
+        downloads_top_k = _normalize_downloads_top_k(payload.downloads_top_k)
         use_kb = _should_use_kb(last_user)
+        show_sources = _did_user_request_sources(last_user)
+
+        merged_prefs = dict(prefs) if isinstance(prefs, dict) else {}
+        merged_prefs["response_mode"] = mode
+        if payload.use_downloads in (True, False):
+            merged_prefs["use_downloads"] = bool(payload.use_downloads)
 
         if payload.user_id:
+            patch: Dict[str, Any] = {"response_mode": mode}
+            if payload.use_downloads in (True, False):
+                patch["use_downloads"] = bool(payload.use_downloads)
             upsert_preferences(
                 db,
                 payload.user_id,
-                {
-                    "response_mode": mode,
-                    "use_downloads": bool(payload.use_downloads) or use_downloads_pref,
-                },
+                patch,
             )
 
-        mem_prompt = _memory_system_prompt(prefs if isinstance(prefs, dict) else {})
+        mem_prompt = _memory_system_prompt(merged_prefs)
         sys_prefix: List[Dict[str, Any]] = []
         if mem_prompt:
             sys_prefix.append({"role": "system", "content": mem_prompt})
         sys_prefix.append({"role": "system", "content": _mode_system_prompt(mode)})
 
+        rag_timeout = False
+        context_chunks: List[Dict[str, Any]] = []
+        final_messages = sys_prefix + trimmed
+
+        def _rag_with_timeout(fn):
+            nonlocal rag_timeout
+            fut = _TOOLS_EXECUTOR.submit(fn)
+            try:
+                return fut.result(timeout=8.0)
+            except Exception:
+                rag_timeout = True
+                try:
+                    fut.cancel()
+                except Exception:
+                    pass
+                return []
+
         if use_downloads:
-            context_chunks = search_downloads(db, last_user or "", top_k=int(payload.downloads_top_k or settings.RAG_TOP_K))
-            system_prompt = build_rag_system_prompt(context_chunks)
-            final_messages = [{"role": "system", "content": system_prompt}] + sys_prefix + trimmed
+            context_chunks = _rag_with_timeout(
+                lambda: search_downloads(
+                    db,
+                    last_user or "",
+                    top_k=downloads_top_k,
+                )
+            )
         elif use_kb:
-            context_chunks = retrieve_context(db, last_user or "", top_k=settings.RAG_TOP_K)
+            context_chunks = _rag_with_timeout(lambda: retrieve_context(db, last_user or "", top_k=settings.RAG_TOP_K))
+
+        if context_chunks:
             system_prompt = build_rag_system_prompt(context_chunks)
             final_messages = [{"role": "system", "content": system_prompt}] + sys_prefix + trimmed
-        else:
-            context_chunks = []
-            final_messages = sys_prefix + trimmed
 
         reply = gerar_resposta(
             mensagens=final_messages,
@@ -837,8 +1014,6 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
             _persist_message(db, payload.session_id, "assistant", reply)
 
         sources = []
-        if use_downloads or use_kb:
-            sources = [{"ref": f"Fonte {i}", "filename": ch.get("filename")} for i, ch in enumerate(context_chunks, start=1)]
 
         return {
             "reply": reply,
@@ -850,8 +1025,10 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 "model": settings.OPENAI_MODEL,
                 "use_kb": use_kb,
                 "use_downloads": use_downloads,
+                "downloads_top_k": downloads_top_k,
                 "response_mode": mode,
                 "saved_to_db": bool(payload.session_id),
+                "rag_timeout": rag_timeout,
             },
         }
 
@@ -868,6 +1045,10 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
 # =========================================================
 @app.post("/chat/stream")
 def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
+    hint = openai_settings_hint(settings)
+    if hint:
+        raise HTTPException(status_code=503, detail=hint)
+
     def _sse(event: str, data: Any) -> str:
         payload_str = json.dumps(data, ensure_ascii=False) if isinstance(data, (dict, list)) else str(data)
         return f"event: {event}\ndata: {payload_str}\n\n"
@@ -902,6 +1083,7 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
                 if m["role"] == "user":
                     last_user = m["content"]
                     break
+            show_sources = _did_user_request_sources(last_user)
 
             # Fast path: list documents (stream-friendly; avoids planner/tools overhead).
             if _is_list_documents_request(last_user):
@@ -957,17 +1139,32 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
                 if m not in ("normal", "didatico", "executivo", "tecnico"):
                     m = "normal"
                 plan = {
-                    "needs_rag": bool(payload.use_downloads) or _should_use_downloads(last_user),
+                    "needs_rag": _resolve_use_downloads(payload.use_downloads, False, last_user),
                     "needs_export": "none",
                     "query": (last_user or "").strip(),
                     "response_mode": m,
                     "must_cite_sources": False,
                 }
 
+            explicit_downloads = payload.use_downloads if payload.use_downloads in (True, False) else None
+            pref_downloads_raw = str(user_prefs.get("use_downloads") or "").strip().lower() if isinstance(user_prefs, dict) else ""
+            pref_downloads: Optional[bool] = None
+            if pref_downloads_raw in ("true", "1", "yes", "sim"):
+                pref_downloads = True
+            elif pref_downloads_raw in ("false", "0", "no", "nao", "não"):
+                pref_downloads = False
+
+            if explicit_downloads is not None:
+                plan["needs_rag"] = bool(explicit_downloads)
+            elif pref_downloads is not None:
+                plan["needs_rag"] = bool(pref_downloads)
+
             # persist high-signal prefs
             if payload.user_id:
                 try:
                     upsert_user_pref(db, payload.user_id, "response_mode", plan.get("response_mode") or "")
+                    if explicit_downloads is not None:
+                        upsert_user_pref(db, payload.user_id, "use_downloads", "true" if explicit_downloads else "false")
                 except Exception:
                     pass
 
@@ -1064,13 +1261,15 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
                 if full:
                     _persist_message(db, payload.session_id, "assistant", full)
 
-            if sources:
-                yield _sse("sources", {"items": sources})
+            # UX rule: never expose sources in chat streaming.
             for a in artifacts:
                 yield _sse("artifact", a)
 
             yield _sse("status", {"phase": "done", "message_id": message_id})
 
+        except (GeneratorExit, asyncio.CancelledError):
+            # Client disconnected / request cancelled; stop quietly (no further yields).
+            return
         except Exception as e:
             yield _sse("status", {"phase": "error", "message": str(e), "message_id": message_id})
 

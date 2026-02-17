@@ -7,7 +7,7 @@ import time
 import numpy as np
 from openai import OpenAI
 
-from settings import settings
+from ..settings import settings
 
 _CLIENT: Optional[OpenAI] = None
 
@@ -17,15 +17,19 @@ def _get_client() -> OpenAI:
     if _CLIENT is not None:
         return _CLIENT
 
-    api_key = (settings.OPENAI_API_KEY or "").strip() or os.getenv("OPENAI_API_KEY", "")
+    api_key = settings.openai_api_key_value() or (os.getenv("OPENAI_API_KEY", "") or "").strip()
     if not api_key:
         raise RuntimeError(
-            "OPENAI_API_KEY não encontrado. Preencha backend/.env (ex.: OPENAI_API_KEY=sk-...)"
+            "OPENAI_API_KEY não encontrado. Configure no .env (ex.: OPENAI_API_KEY=sk-...)"
         )
 
     # timeout aqui é importante para não “travar” o stream sem erro
     _CLIENT = OpenAI(api_key=api_key, timeout=settings.OPENAI_TIMEOUT)
     return _CLIENT
+
+
+def get_client() -> OpenAI:
+    return _get_client()
 
 
 def _build_formatting_system_message() -> Dict[str, str]:

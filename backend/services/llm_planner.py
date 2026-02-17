@@ -5,8 +5,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from services.openai_service import gerar_resposta
-from settings import settings
+from .openai_service import gerar_resposta
+from ..settings import settings
 
 
 DEFAULT_PLAN: Dict[str, Any] = {

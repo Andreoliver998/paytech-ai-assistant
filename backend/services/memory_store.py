@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from models import ProductPrefDB, ThreadMetaDB, UserPrefDB
-from services.openai_service import cosine_similarity, embed_texts
-from settings import settings
+from ..models import ProductPrefDB, ThreadMetaDB, UserPrefDB
+from .openai_service import cosine_similarity, embed_texts
+from ..settings import settings
 
 
 EMBED_TIMEOUT_S = 1.2

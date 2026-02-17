@@ -9,10 +9,10 @@ import pandas as pd
 from pypdf import PdfReader
 from sqlalchemy.orm import Session
 
-from models import FileDB, KBChunkDB
-from services.openai_service import embed_texts, cosine_similarity
-from settings import settings
-from utils.files import load_kb, save_kb
+from ..models import FileDB, KBChunkDB
+from .openai_service import embed_texts, cosine_similarity
+from ..settings import settings
+from ..utils.files import load_kb, save_kb
 
 
 def split_text(text: str, chunk_size: int, overlap: int) -> List[str]:

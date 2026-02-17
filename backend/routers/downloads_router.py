@@ -9,9 +9,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from db import get_db
-from models import DownloadFileDB
-from services.downloads_service import (
+from ..db import get_db
+from ..models import DownloadFileDB
+from ..services.downloads_service import (
     ALLOWED_EXTS,
     delete_download,
     extract_text_by_ext,
@@ -20,7 +20,7 @@ from services.downloads_service import (
     safe_filename,
     search_downloads,
 )
-from utils.files import DOWNLOADS_DIR
+from ..utils.files import DOWNLOADS_DIR
 
 
 router = APIRouter(prefix="/downloads", tags=["downloads"])

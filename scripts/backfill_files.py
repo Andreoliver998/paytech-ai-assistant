@@ -1,10 +1,15 @@
 import os
 import re
+import sys
 from pathlib import Path
 from sqlalchemy.orm import Session
 
-from db import SessionLocal, Base, engine
-from models import FileDB
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from backend.db import SessionLocal, Base, engine
+from backend.models import FileDB
 
 Base.metadata.create_all(bind=engine)
 
@@ -20,7 +25,7 @@ def main():
     if DATA_ROOT:
         data_dir = Path(DATA_ROOT)
     else:
-        data_dir = Path(__file__).resolve().parent / "data"
+        data_dir = REPO_ROOT / "backend" / "data"
 
     uploads_dir = data_dir / "uploads"
     if not uploads_dir.exists():
@@ -34,7 +39,7 @@ def main():
         if not p.is_file():
             continue
 
-        file_id = p.name
+        file_id = p.stem
         ext = (p.suffix or "").lower().lstrip(".")
         filename = guess_original_filename(p.name)
         size = int(p.stat().st_size)
@@ -55,7 +60,7 @@ def main():
     db.commit()
     db.close()
 
-    print(f"✅ Backfill concluído. Inseridos: {inserted}")
+    print(f"Backfill concluido. Inseridos: {inserted}")
 
 if __name__ == "__main__":
     main()

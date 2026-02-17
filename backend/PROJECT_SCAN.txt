@@ -1,0 +1,438 @@
+
+
+==================== ROOT ====================
+
+
+Path
+----
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend
+
+
+
+==================== PROJECT TREE ====================
+
+
+FullName
+--------
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\data
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\logs
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\routers
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\storage
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\utils
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\__init__.py
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\.env
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\.env.example
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\app.py
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\db.py
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\main.py
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\models.py
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\PROJECT_SCAN.txt
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\requirements.txt
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\run_backend.bat
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\run_backend.ps1
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\run_dev.ps1
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\settings.py
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\data\downloads
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\data\uploads
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\data\kb_store.j…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\data\paytech.db
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\data\uploads\17…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\logs\uvicorn_st…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\logs\uvicorn_st…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\routers\__init_…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\routers\downloa…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\routers\export_…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\__init…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\downlo…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\export…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\llm_pl…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\memory…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\memory…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\openai…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\rag_se…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\rag_se…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\title_…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\tool_r…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\services\verifi…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\storage\downloa…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\storage\exports
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\storage\downloa…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\storage\downloa…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\utils\__init__.…
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\utils\files.py
+C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\utils\text.py
+
+
+
+==================== STACK DETECTION ====================
+
+Python
+FastAPI provável
+JavaScript
+Banco SQLite/local
+
+
+==================== REQUIREMENTS ====================
+
+
+--- C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\requirements.txt ---
+altair==5.5.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.12.1
+argon2-cffi==25.1.0
+argon2-cffi-bindings==25.1.0
+arrow==1.4.0
+asttokens==3.0.1
+async-lru==2.1.0
+attrs==25.4.0
+babel==2.18.0
+beautifulsoup4==4.14.3
+bleach==6.3.0
+blinker==1.9.0
+branca==0.8.1
+cachetools==6.1.0
+camelot-py==1.0.0
+certifi==2026.1.4
+cffi==2.0.0
+chardet==5.2.0
+charset-normalizer==3.4.4
+click==8.2.1
+colorama==0.4.6
+comm==0.2.3
+contourpy==1.3.3
+cryptography==45.0.5
+cycler==0.12.1
+debugpy==1.8.20
+decorator==5.2.1
+defusedxml==0.7.1
+distro==1.9.0
+et_xmlfile==2.0.0
+executing==2.2.1
+fastapi==0.128.3
+fastjsonschema==2.21.2
+Flask==3.1.2
+Flask-Login==0.6.3
+Flask-SQLAlchemy==3.1.1
+folium==0.20.0
+fonttools==4.61.1
+fpdf==1.7.2
+fqdn==1.5.1
+gitdb==4.0.12
+GitPython==3.1.45
+greenlet==3.2.3
+groq==0.30.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.11
+ipykernel==7.1.0
+ipython==9.10.0
+ipython_pygments_lexers==1.1.1
+ipywidgets==8.1.8
+isoduration==20.11.0
+itsdangerous==2.2.0
+jedi==0.19.2
+Jinja2==3.1.6
+jiter==0.13.0
+json5==0.13.0
+jsonpatch==1.33
+jsonpointer==3.0.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+jupyter==1.1.1
+jupyter-console==6.6.3
+jupyter-events==0.12.0
+jupyter-lsp==2.3.0
+jupyter_client==8.8.0
+jupyter_core==5.9.1
+jupyter_server==2.17.0
+jupyter_server_terminals==0.5.4
+jupyterlab==4.5.3
+jupyterlab_pygments==0.3.0
+jupyterlab_server==2.28.0
+jupyterlab_widgets==3.0.16
+kiwisolver==1.4.9
+langchain==0.3.27
+langchain-core==0.3.72
+langchain-groq==0.3.6
+langchain-text-splitters==0.3.9
+langsmith==0.4.10
+lark==1.3.1
+lxml==6.0.0
+MarkupSafe==3.0.3
+matplotlib==3.10.8
+matplotlib-inline==0.2.1
+mistune==3.2.0
+narwhals==1.48.1
+nbclient==0.10.4
+nbconvert==7.17.0
+nbformat==5.10.4
+nest-asyncio==1.6.0
+notebook==7.5.3
+notebook_shim==0.2.4
+numpy==2.2.6
+openai==2.17.0
+opencv-python-headless==4.12.0.88
+openpyxl==3.1.5
+orjson==3.11.1
+packaging==25.0
+pandas==2.3.1
+pandocfilters==1.5.1
+parso==0.8.5
+pdf2image==1.17.0
+pdfminer.six==20250506
+pdfplumber==0.11.7
+pillow==11.3.0
+platformdirs==4.5.1
+plotly==6.2.0
+prometheus_client==0.24.1
+prompt_toolkit==3.0.52
+protobuf==6.31.1
+psutil==7.2.2
+pure_eval==0.2.3
+pyarrow==21.0.0
+pycparser==3.0
+pydantic==2.11.7
+pydantic-settings==2.12.0
+pydantic_core==2.33.2
+pydeck==0.9.1
+Pygments==2.19.2
+PyMuPDF==1.26.3
+pyparsing==3.3.2
+pypdf==5.9.0
+pypdfium2==4.30.0
+pytesseract==0.3.13
+python-dateutil==2.9.0.post0
+python-docx==1.2.0
+python-dotenv==1.2.1
+python-json-logger==4.0.0
+python-multipart==0.0.22
+pytz==2025.2
+pywin32==311
+pywinpty==3.0.2
+PyYAML==6.0.3
+pyzmq==27.1.0
+referencing==0.37.0
+regex==2026.1.15
+reportlab==4.4.9
+requests==2.32.5
+requests-toolbelt==1.0.0
+rfc3339-validator==0.1.4
+rfc3986-validator==0.1.1
+rfc3987-syntax==1.1.0
+rpds-py==0.30.0
+scapy==2.6.1
+seaborn==0.13.2
+Send2Trash==2.1.0
+setuptools==80.10.2
+six==1.17.0
+smmap==5.0.2
+sniffio==1.3.1
+soupsieve==2.8.3
+SQLAlchemy==2.0.42
+stack-data==0.6.3
+starlette==0.52.1
+streamlit==1.47.1
+streamlit-folium==0.25.1
+tabulate==0.9.0
+tenacity==9.1.2
+terminado==0.18.1
+tiktoken==0.12.0
+tinycss2==1.4.0
+toml==0.10.2
+tornado==6.5.4
+tqdm==4.67.3
+traitlets==5.14.3
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzdata==2025.3
+Unidecode==1.4.0
+uri-template==1.3.0
+urllib3==2.6.3
+uvicorn==0.40.0
+watchdog==6.0.0
+wcwidth==0.5.3
+webcolors==25.10.0
+webencodings==0.5.1
+websocket-client==1.9.0
+Werkzeug==3.1.3
+widgetsnbextension==4.0.15
+xyzservices==2025.4.0
+zstandard==0.23.0
+
+
+==================== FASTAPI ROUTES ====================
+
+
+app.py:279:@app.get("/health")
+app.py:283:@app.options("/chat/stream")
+app.py:289:@app.options("/chat")
+app.py:294:@app.get("/health/openai")
+app.py:310:@app.get("/")
+app.py:321:@app.get("/favicon.ico")
+app.py:329:@app.get("/api/health")
+app.py:334:@app.get("/config-check")
+app.py:350:@app.get("/meta")
+app.py:371:@app.get("/debug/paths")
+app.py:383:@app.get("/sessions")
+app.py:399:@app.post("/sessions")
+app.py:424:@app.get("/sessions/{session_id}")
+app.py:444:@app.put("/sessions/{session_id}")
+app.py:477:@app.delete("/sessions/{session_id}")
+app.py:487:@app.get("/exports/{name}")
+app.py:509:@app.get("/memory/{user_id}")
+app.py:515:@app.put("/memory/{user_id}")
+app.py:524:@app.post("/titles/generate")
+app.py:540:@app.post("/upload")
+app.py:582:@app.get("/files")
+app.py:594:@app.get("/files/db")
+app.py:611:@app.get("/files/db/{file_id}/download")
+app.py:629:@app.get("/kb/stats")
+app.py:668:@app.get("/kb/file/{file_id}/preview")
+app.py:739:@app.post("/kb/summarize")
+app.py:751:@app.get("/kb/summarize")
+app.py:764:@app.post("/api/kb/summarize")
+app.py:769:@app.get("/api/kb/summarize")
+app.py:785:@app.post("/documents/{doc_id}/summarize")
+app.py:796:@app.post("/api/documents/{doc_id}/summarize")
+app.py:804:@app.post("/chat")
+app.py:912:@app.post("/chat/stream")
+
+
+
+==================== STREAM / OPENAI SEARCH ====================
+
+
+routers\downloads_router.py:110:    }.get(ext, "application/octet-stream")
+services\downloads_service.py:11:from .openai_service import cosine_similarity, embed_texts
+services\downloads_service.py:41:    Embeddings são o caminho ideal. Se OpenAI não estiver configurado/der erro,
+services\downloads_service.py:45:        return embed_texts(texts, model=settings.OPENAI_EMBED_MODEL)
+services\downloads_service.py:182:        }.get((r.ext or "").lower(), "application/octet-stream")
+services\llm_planner.py:8:from .openai_service import gerar_resposta
+services\llm_planner.py:100:    # blocking LLM call before we can start streaming (UX: "chat não responde").
+services\llm_planner.py:137:            modelo=model or settings.OPENAI_MODEL,
+services\llm_planner.py:142:        # Avoid blocking the whole stream if the planner call stalls.
+services\memory_store.py:12:from .openai_service import cosine_similarity, embed_texts
+services\memory_store.py:38:    Embeddings são úteis para recall, mas nunca devem bloquear o streaming.
+services\memory_store.py:46:            fut = ex.submit(embed_texts, texts, settings.OPENAI_EMBED_MODEL)
+services\openai_service.py:8:from openai import OpenAI
+services\openai_service.py:12:_CLIENT: Optional[OpenAI] = None
+services\openai_service.py:15:def _get_client() -> OpenAI:
+services\openai_service.py:20:    api_key = settings.openai_api_key_value() or (os.getenv("OPENAI_API_KEY", "") or "").strip()
+services\openai_service.py:23:            "OPENAI_API_KEY não encontrado. Configure no .env (ex.: OPENAI_API_KEY=sk-...)"
+services\openai_service.py:26:    # timeout aqui é importante para não “travar” o stream sem erro
+services\openai_service.py:27:    _CLIENT = OpenAI(api_key=api_key, timeout=settings.OPENAI_TIMEOUT)
+services\openai_service.py:31:def get_client() -> OpenAI:
+services\openai_service.py:90:    emb_model = model or settings.OPENAI_EMBED_MODEL
+services\openai_service.py:105:    model_to_use = modelo or settings.OPENAI_MODEL
+services\openai_service.py:111:            resp = client.chat.completions.create(
+services\openai_service.py:125:# Helpers robustos para stream
+services\openai_service.py:144:    Extrai token do streaming de forma robusta.
+services\openai_service.py:167:    # 3) fallback: message.content (não-stream / variações)
+services\openai_service.py:187:def gerar_resposta_stream(
+services\openai_service.py:194:    - Este stream NUNCA deve “dar sucesso” retornando vazio.
+services\openai_service.py:195:    - Se o stream não produzir tokens, faz fallback para gerar_resposta()
+services\openai_service.py:202:    model_to_use = modelo or settings.OPENAI_MODEL
+services\openai_service.py:208:        # retry leve para stream (evita casos transitórios)
+services\openai_service.py:212:                stream = client.chat.completions.create(
+services\openai_service.py:216:                    stream=True,
+services\openai_service.py:219:                for chunk in stream:
+services\openai_service.py:229:                # ✅ stream terminou sem tokens: força fallback
+services\openai_service.py:231:                    raise RuntimeError("Stream finalizou sem tokens (vazio).")
+services\openai_service.py:249:                yield f"[Erro no streaming e fallback vazio: {last_err}]"
+services\openai_service.py:251:            yield f"[Erro no streaming: {last_err} | Erro no fallback: {e}]"
+services\rag_service.py:13:from .openai_service import embed_texts, cosine_similarity
+services\rag_service.py:139:    embeddings = embed_texts(chunks, model=settings.OPENAI_EMBED_MODEL)
+services\rag_service.py:195:    q_emb = embed_texts([q], model=settings.OPENAI_EMBED_MODEL)
+services\title_service.py:6:from .openai_service import gerar_resposta
+services\title_service.py:53:        modelo=model or settings.OPENAI_MODEL,
+utils\text.py:20:        enc = tiktoken.encoding_for_model(model or settings.OPENAI_MODEL)
+app.py:16:from fastapi.responses import StreamingResponse, FileResponse, Response
+app.py:23:from .services.openai_service import gerar_resposta, gerar_resposta_stream, get_client
+app.py:39:from .settings import settings, validate_openai_settings, ENV_FILE_USED
+app.py:66:    validate_openai_settings(settings)
+app.py:98:    # simplifies CORS semantics and avoids edge cases with streaming.
+app.py:283:@app.options("/chat/stream")
+app.py:284:def chat_stream_options():
+app.py:294:@app.get("/health/openai")
+app.py:295:def health_openai():
+app.py:303:            "openai": "ok",
+app.py:308:        raise HTTPException(status_code=503, detail=f"OpenAI healthcheck failed: {e}")
+app.py:337:        "api_key_loaded": settings.openai_api_key_loaded(),
+app.py:338:        "api_key_fingerprint": settings.openai_api_key_fingerprint() if settings.openai_api_key_loaded() else "",
+app.py:340:        "model": settings.OPENAI_MODEL,
+app.py:341:        "embed_model": settings.OPENAI_EMBED_MODEL,
+app.py:359:            "chat_stream": "/chat/stream",
+app.py:498:    }.get(path.suffix.lower(), "application/octet-stream")
+app.py:529:        model=settings.OPENAI_MODEL,
+app.py:622:    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+app.py:729:        modelo=settings.OPENAI_MODEL,
+app.py:825:                    "model": settings.OPENAI_MODEL,
+app.py:872:            modelo=settings.OPENAI_MODEL,
+app.py:893:                "model": settings.OPENAI_MODEL,
+app.py:910:# Chat (STREAM) — SSE (POST) com eventos meta/delta/citations/done/error
+app.py:912:@app.post("/chat/stream")
+app.py:913:def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
+app.py:922:        # Map for compatibility so UI modes behave consistently in streaming.
+app.py:949:            # Fast path: list documents (stream-friendly; avoids planner/tools overhead).
+app.py:985:                    model=settings.OPENAI_MODEL,
+app.py:1086:            for token in gerar_resposta_stream(
+app.py:1088:                modelo=settings.OPENAI_MODEL,
+app.py:1120:    return StreamingResponse(
+app.py:1122:        media_type="text/event-stream; charset=utf-8",
+settings.py:61:    # OpenAI
+settings.py:62:    OPENAI_API_KEY: SecretStr = SecretStr("")
+settings.py:63:    OPENAI_MODEL: str = "gpt-4o-mini"
+settings.py:64:    OPENAI_EMBED_MODEL: str = "text-embedding-3-small"
+settings.py:65:    OPENAI_TIMEOUT: int = 60
+settings.py:98:    def openai_api_key_value(self) -> str:
+settings.py:100:            return (self.OPENAI_API_KEY.get_secret_value() or "").strip()
+settings.py:104:    def openai_api_key_loaded(self) -> bool:
+settings.py:105:        return bool(self.openai_api_key_value())
+settings.py:107:    def openai_api_key_fingerprint(self) -> str:
+settings.py:111:        key = self.openai_api_key_value()
+settings.py:120:            "Config loaded: ENV=%s env_file_used=%s env_files_found=%s openai_api_key_loaded=%s openai_api_key_fp=%s",
+settings.py:124:            self.openai_api_key_loaded(),
+settings.py:125:            self.openai_api_key_fingerprint() if self.openai_api_key_loaded() else "",
+settings.py:129:def validate_openai_settings(s: Settings) -> None:
+settings.py:130:    if s.openai_api_key_loaded():
+settings.py:135:        "OPENAI_API_KEY não encontrado.",
+settings.py:147:        f"- Crie/edite {REPO_ROOT / '.env'} com: OPENAI_API_KEY=sk-...",
+
+
+
+==================== FRONTEND CHAT DETECTION ====================
+
+
+
+==================== DATABASE ====================
+
+
+    Directory: C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend\data
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+-a---          10/02/2026    13:46         536576 paytech.db
+
+
+
+==================== ENV FILES (CHECK MANUALLY FOR SECRETS) ====================
+
+
+    Directory: C:\Users\andre\Documents\GitHub\paytech-ai-assistant\backend
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+-a---          09/02/2026    01:55            491 .env
+-a---          10/02/2026    00:18           1222 .env.example
+
+
+
+==================== LARGE FILES (>5MB) ====================
+
+
+
+==================== POTENTIAL RISK FILES ====================
+

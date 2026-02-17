@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from services.openai_service import gerar_resposta
-from settings import settings
+from .openai_service import gerar_resposta
+from ..settings import settings
 
 
 def _clean_title(s: str) -> str:
@@ -54,4 +54,3 @@ def generate_conversation_title(
         temperatura=0.2,
     )
     return _clean_title(out)
-

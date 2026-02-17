@@ -5,7 +5,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
-from settings import settings
+from .settings import settings
 
 
 BASE_DIR = Path(__file__).resolve().parent

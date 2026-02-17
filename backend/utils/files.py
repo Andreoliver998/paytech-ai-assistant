@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict
 
-from settings import settings
+from ..settings import settings
 
 BASE_DIR = Path(__file__).resolve().parents[1]  # backend/
 DATA_DIR = Path(settings.PAYTECH_DATA_DIR) if settings.PAYTECH_DATA_DIR else (BASE_DIR / "data")

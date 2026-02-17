@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from services.rag_search import rag_search_downloads
-from services.export_service import render_conversation_docx_bytes, render_conversation_pdf_bytes
+from .rag_search import rag_search_downloads
+from .export_service import render_conversation_docx_bytes, render_conversation_pdf_bytes
 
 
 @dataclass
@@ -54,4 +54,3 @@ def run_tools(
             artifacts.append({"type": "pdf", "name": name, "url": f"/exports/{name}"})
 
     return ToolResult(sources=sources, artifacts=artifacts)
-

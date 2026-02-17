@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from models import DownloadChunkDB, DownloadChunkMetaDB
-from services.downloads_service import search_downloads
+from ..models import DownloadChunkDB, DownloadChunkMetaDB
+from .downloads_service import search_downloads
 
 
 def _parse_meta_from_text(text: str) -> Dict[str, Any]:
@@ -91,4 +91,3 @@ def rag_search_downloads(db: Session, query: str, top_k: int = 6) -> List[Dict[s
             }
         )
     return out
-

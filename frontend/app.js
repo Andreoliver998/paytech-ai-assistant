@@ -8,9 +8,19 @@
 // =============================
 // Config
 // =============================
-const PAYTECH_BUILD = "2026-02-10_009";
-const BACKEND_DEFAULT = "http://localhost:8000";
+const PAYTECH_BUILD = "2026-02-10_025";
+// Prefer explicit IPv4 loopback: on some Windows setups `localhost` resolves to IPv6 (::1)
+// while uvicorn is bound only to 127.0.0.1, which can break streaming fetches.
+const BACKEND_DEFAULT = "http://127.0.0.1:8000";
 const BACKEND_BASE_KEY = "paytech.backendBase";
+const DEBUG_STREAM_MODE = (() => {
+  try {
+    const url = new URL(window.location.href);
+    return (url.searchParams.get("debugstream") || "").trim() === "1";
+  } catch {
+    return false;
+  }
+})();
 
 // =============================
 // Crash/diagnostic hooks (surface issues instead of "send does nothing")
@@ -22,22 +32,33 @@ function _captureEarlyError(kind, err) {
   try {
     const msg = `${kind}: ${String(err?.message || err || "")}`.trim();
     _earlyErrors.push({ kind, msg, at: Date.now() });
-    // Always log (DevTools)
     // eslint-disable-next-line no-console
     console.error("[paytech]", kind, err);
 
-    // Surface in-UI (avoid "chat não responde" with no visible error).
     const now = Date.now();
-    const shouldToast = msg && (msg !== _lastErrToastMsg || (now - _lastErrToastAt) > 2500);
-    if (shouldToast && typeof window.toast === "function") {
+    const shouldToast =
+      msg && (msg !== _lastErrToastMsg || now - _lastErrToastAt > 2500);
+
+    // NOTE: `toast()` is a function declaration (hoisted), so it's safe to call it here.
+    if (shouldToast && typeof toast === "function") {
       _lastErrToastAt = now;
       _lastErrToastMsg = msg;
-      try { window.toast(`Erro no frontend: ${msg}`.slice(0, 220), { ms: 6500 }); } catch { }
+      try {
+        toast(`Erro no frontend: ${msg}`.slice(0, 220), { ms: 6500 });
+      } catch {}
     }
-  } catch { }
+  } catch {}
 }
-window.addEventListener("error", (e) => _captureEarlyError("error", e?.error || e?.message || e), { capture: true });
-window.addEventListener("unhandledrejection", (e) => _captureEarlyError("unhandledrejection", e?.reason || e), { capture: true });
+window.addEventListener(
+  "error",
+  (e) => _captureEarlyError("error", e?.error || e?.message || e),
+  { capture: true }
+);
+window.addEventListener(
+  "unhandledrejection",
+  (e) => _captureEarlyError("unhandledrejection", e?.reason || e),
+  { capture: true }
+);
 
 function resolveBackendBase() {
   try {
@@ -48,6 +69,14 @@ function resolveBackendBase() {
       return qp;
     }
     const saved = (localStorage.getItem(BACKEND_BASE_KEY) || "").trim();
+    // Windows gotcha: `localhost` often resolves to IPv6 (::1) while uvicorn is frequently
+    // bound only to 127.0.0.1. Non-streaming requests may appear to work intermittently,
+    // but streaming is much more sensitive. Normalize the common default to IPv4.
+    if (saved === "http://localhost:8000") {
+      const normalized = "http://127.0.0.1:8000";
+      try { localStorage.setItem(BACKEND_BASE_KEY, normalized); } catch {}
+      return normalized;
+    }
     return saved || BACKEND_DEFAULT;
   } catch {
     return BACKEND_DEFAULT;
@@ -135,6 +164,7 @@ let pendingFiles = []; // File[]
 let isGenerating = false;
 let currentAbortController = null;
 let pinnedToBottom = true;
+let sendInFlight = false;
 let sidebarCollapsed = false;
 let useDownloadsInChat = false;
 let responseMode = "tecnico"; // tecnico | resumido | didatico | estrategico
@@ -143,14 +173,26 @@ let userId = "";
 let backendOnline = null; // boolean | null
 let topbarStatusOverride = "";
 let downloadsFileCount = null; // number | null
+
 window.__paytech = window.__paytech || {};
+// DevTools ergonomics: create global bindings (in addition to `window.__paytech`).
+// eslint-disable-next-line no-var
+var __paytech = window.__paytech;
+// Common typo during debugging.
+// eslint-disable-next-line no-var
+var _paytech = window.__paytech;
+// Also expose as a window property (so DevTools can resolve it consistently).
+try { window._paytech = window.__paytech; } catch {}
 window.__paytech.build = PAYTECH_BUILD;
 try {
   // eslint-disable-next-line no-console
   console.info("[paytech] build", PAYTECH_BUILD);
-} catch { }
+} catch {}
+
 // Global event bus (must stay the same reference even if the script is loaded twice).
-const _ptEvents = Array.isArray(window.__paytech.events) ? window.__paytech.events : [];
+const _ptEvents = Array.isArray(window.__paytech.events)
+  ? window.__paytech.events
+  : [];
 window.__paytech.events = _ptEvents;
 window.__paytech.loadCount = Number(window.__paytech.loadCount || 0) + 1;
 const _PT_DEBUG_KEY = "paytech.debugEvents.v1";
@@ -162,39 +204,52 @@ function ptLog(name, data) {
     _ptEvents.push(ev);
     if (_ptEvents.length > 200) _ptEvents.splice(0, _ptEvents.length - 200);
 
-    // Persist debug trail across reloads (helps when a click triggers a reload or when the user refreshes before copying).
     _ptPersistCounter++;
-    if (_ptPersistCounter % _ptPersistEvery === 0 || String(ev.name).startsWith("fetch:") || String(ev.name).startsWith("sse:")) {
+    if (
+      _ptPersistCounter % _ptPersistEvery === 0 ||
+      String(ev.name).startsWith("fetch:") ||
+      String(ev.name).startsWith("sse:")
+    ) {
       try {
         localStorage.setItem(
           _PT_DEBUG_KEY,
-          JSON.stringify({ build: PAYTECH_BUILD, loadCount: window.__paytech.loadCount, at: Date.now(), events: _ptEvents.slice(-200) })
+          JSON.stringify({
+            build: PAYTECH_BUILD,
+            loadCount: window.__paytech.loadCount,
+            at: Date.now(),
+            events: _ptEvents.slice(-200),
+          })
         );
-      } catch { }
+      } catch {}
     }
-  } catch { }
+  } catch {}
 }
 window.__paytech.log = ptLog;
 ptLog("init", { build: PAYTECH_BUILD, loadCount: window.__paytech.loadCount });
+
 window.__paytech.state = () => {
   const sel = (() => {
-    try { return getSelectedConversation(); } catch { return null; }
+    try {
+      return getSelectedConversation();
+    } catch {
+      return null;
+    }
   })();
-  return ({
-  BACKEND_BASE,
-  backendOnline,
-  bindOk: !!window.__paytech?.bindOk,
-  selectedConversationId,
-  selectedConversationFound: !!sel,
-  selectedConversationMessages: sel?.messages?.length ?? null,
-  conversations: Array.isArray(conversations) ? conversations.length : null,
-  isGenerating,
-  useDownloadsInChat,
-  downloadsFileCount,
-  earlyErrors: _earlyErrors.length,
-  lastError: _earlyErrors.length ? _earlyErrors[_earlyErrors.length - 1] : null,
-  lastEvent: _ptEvents.length ? _ptEvents[_ptEvents.length - 1] : null,
-  });
+  return {
+    BACKEND_BASE,
+    backendOnline,
+    bindOk: !!window.__paytech?.bindOk,
+    selectedConversationId,
+    selectedConversationFound: !!sel,
+    selectedConversationMessages: sel?.messages?.length ?? null,
+    conversations: Array.isArray(conversations) ? conversations.length : null,
+    isGenerating,
+    useDownloadsInChat,
+    downloadsFileCount,
+    earlyErrors: _earlyErrors.length,
+    lastError: _earlyErrors.length ? _earlyErrors[_earlyErrors.length - 1] : null,
+    lastEvent: _ptEvents.length ? _ptEvents[_ptEvents.length - 1] : null,
+  };
 };
 window.__paytech.eventsLast = (n = 20) => {
   const k = Math.max(1, Number(n || 20));
@@ -202,26 +257,32 @@ window.__paytech.eventsLast = (n = 20) => {
 };
 window.__paytech.eventsDump = (n = 50) => JSON.stringify(window.__paytech.eventsLast(n), null, 2);
 window.__paytech.eventsDumpPersisted = () => {
-  try { return localStorage.getItem(_PT_DEBUG_KEY) || ""; } catch { return ""; }
+  try {
+    return localStorage.getItem(_PT_DEBUG_KEY) || "";
+  } catch {
+    return "";
+  }
 };
 window.__paytech.eventsClear = () => {
-  try { _ptEvents.splice(0, _ptEvents.length); } catch { }
-  try { localStorage.removeItem(_PT_DEBUG_KEY); } catch { }
+  try {
+    _ptEvents.splice(0, _ptEvents.length);
+  } catch {}
+  try {
+    localStorage.removeItem(_PT_DEBUG_KEY);
+  } catch {}
   ptLog("init", { build: PAYTECH_BUILD, loadCount: window.__paytech.loadCount, cleared: true });
 };
 window.__paytech.peekComposer = () => {
   const main = String(el.input?.value || "");
   const empty = String(el.emptyInput?.value || "");
-  const active = false;
-  try {
-    // uses app logic (selected conversation)
-    // eslint-disable-next-line no-unused-vars
-    const _ = hasActiveConversation();
-  } catch { }
   const hasActive = (() => {
-    try { return hasActiveConversation(); } catch { return false; }
+    try {
+      return hasActiveConversation();
+    } catch {
+      return false;
+    }
   })();
-  const chosen = hasActive ? main : (empty.trim() ? empty : main);
+  const chosen = hasActive ? main : empty.trim() ? empty : main;
   return {
     hasActiveConversation: hasActive,
     mainLen: main.length,
@@ -241,9 +302,11 @@ window.__paytech.peekComposer = () => {
       if (!elm) return;
       elm.setAttribute("data-pt-flash", "1");
       window.setTimeout(() => {
-        try { elm.removeAttribute("data-pt-flash"); } catch { }
+        try {
+          elm.removeAttribute("data-pt-flash");
+        } catch {}
       }, 180);
-    } catch { }
+    } catch {}
   }
 
   function logComposerClick(kind, target) {
@@ -280,62 +343,70 @@ window.__paytech.peekComposer = () => {
   document.addEventListener("pointerdown", (e) => logComposerClick("cap:pointerdown", e.target), true);
   document.addEventListener("click", (e) => logComposerClick("cap:click", e.target), true);
 
-  // Catch-all for the bottom composer area (helps detect overlays intercepting the click).
-  document.addEventListener("click", (e) => {
-    try {
-      const y = Number(e?.clientY ?? -1);
-      if (!isFinite(y)) return;
-      if (y < (window.innerHeight - 170)) return; // only bottom area
-      const t = e.target;
-      const path = (typeof e.composedPath === "function" ? e.composedPath() : []) || [];
-      const pathBrief = path
-        .slice(0, 8)
-        .map((n) => {
-          try {
-            if (!n || !n.tagName) return String(n);
-            const id = n.id ? `#${n.id}` : "";
-            const cls = (n.className && typeof n.className === "string") ? `.${n.className.split(/\s+/).filter(Boolean).slice(0, 2).join(".")}` : "";
-            return `${n.tagName}${id}${cls}`;
-          } catch {
-            return "?";
-          }
-        });
-      ptLog("cap:click:bottom", {
-        x: e.clientX,
-        y,
-        target: {
-          tag: String(t?.tagName || ""),
-          id: String(t?.id || ""),
-          cls: String(t?.className || ""),
-        },
-        path: pathBrief,
-      });
-    } catch { }
-  }, true);
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (window.__paytech?.bindOk) return;
 
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter" || e.shiftKey) return;
-    const ta = e.target?.closest?.("#input,#emptyInput");
-    if (!ta) return;
-    ptLog("cap:enter", {
-      id: ta.id,
-      isGenerating,
-      hasActiveConversation: hasActiveConversation(),
-      len: String(ta.value || "").length,
-    });
-  }, true);
+      // tenta inicializar
+      try {
+        window.__paytech?.bootOnce?.();
+      } catch {}
+
+      // ✅ RE-CHECA: se boot resolveu o bind, NÃO dispara fallback
+      if (window.__paytech?.bindOk) return;
+
+      const btn = e.target?.closest?.("#sendBtn");
+      if (!btn) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        sendMessage();
+      } catch (err) {
+        _captureEarlyError("sendMessage(click)", err);
+      }
+    },
+    true
+  );
+
+
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Enter" || e.shiftKey) return;
+      const ta = e.target?.closest?.("#input,#emptyInput");
+      if (!ta) return;
+      ptLog("cap:enter", {
+        id: ta.id,
+        isGenerating,
+        hasActiveConversation: hasActiveConversation(),
+        len: String(ta.value || "").length,
+      });
+    },
+    true
+  );
 })();
+
 window.__paytech.selftest = async () => {
   const base = String(BACKEND_BASE || "").trim();
   const out = {
     base,
     health: { ok: false, status: null },
-    chat: { ok: false, status: null, hasReply: false },
-    stream: { ok: false, status: null, contentType: "", sawDelta: false, sawDone: false, bytes: 0 },
+    chat: { ok: false, status: null, hasReply: false, error: null },
+    stream: {
+      ok: false,
+      status: null,
+      contentType: "",
+      sawDelta: false,
+      sawDone: false,
+      bytes: 0,
+      aborted: false,
+      error: null,
+    },
     error: null,
   };
   try {
-    // health
     try {
       const r = await fetch(`${base}/health`, { method: "GET" });
       out.health.status = r.status;
@@ -345,31 +416,48 @@ window.__paytech.selftest = async () => {
       out.error = `health: ${String(e?.message || e)}`;
     }
 
-    // chat (JSON)
     try {
+      const acChat = new AbortController();
+      const chatTimer = window.setTimeout(() => {
+        try {
+          acChat.abort();
+        } catch {}
+      }, 6500);
       const r = await fetch(`${base}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: [{ role: "user", content: "ping" }] }),
+        signal: acChat.signal,
       });
       out.chat.status = r.status;
       out.chat.ok = r.ok;
       const data = await r.json().catch(() => null);
       out.chat.hasReply = !!String(data?.reply || "").trim();
+      try {
+        clearTimeout(chatTimer);
+      } catch {}
     } catch (e) {
-      out.chat.ok = false;
-      out.error = `chat: ${String(e?.message || e)}`;
+      if (String(e?.name || "") === "AbortError") {
+        out.chat.ok = false;
+        out.chat.status = out.chat.status ?? "timeout";
+        out.chat.error = "timeout (6.5s)";
+      } else {
+        out.chat.ok = false;
+        out.chat.error = String(e?.message || e);
+      }
     }
 
-    // stream (SSE) - read a few seconds
     const ac = new AbortController();
     const timer = window.setTimeout(() => {
-      try { ac.abort(); } catch { }
-    }, 3500);
+      try {
+        ac.abort();
+      } catch {}
+    }, 10000);
+
     try {
       const r = await fetch(`${base}/chat/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({ messages: [{ role: "user", content: "ping" }] }),
         signal: ac.signal,
       });
@@ -386,18 +474,26 @@ window.__paytech.selftest = async () => {
           out.stream.bytes += value?.byteLength || 0;
           buf += decoder.decode(value, { stream: true });
           if (buf.includes("event: delta")) out.stream.sawDelta = true;
-          if (buf.includes("\"phase\": \"done\"") || buf.includes("event: done")) out.stream.sawDone = true;
+          if (buf.includes('"phase": "done"') || buf.includes("event: done")) out.stream.sawDone = true;
           if (out.stream.sawDelta && out.stream.bytes > 200) break;
         }
       }
     } catch (e) {
-      if (String(e?.name || "") !== "AbortError") {
-        out.error = `stream: ${String(e?.message || e)}`;
+      if (String(e?.name || "") === "AbortError") {
+        out.stream.aborted = true;
+        out.stream.error = "timeout (10s)";
+      } else {
+        out.stream.error = String(e?.message || e);
       }
     } finally {
-      try { clearTimeout(timer); } catch { }
+      try {
+        clearTimeout(timer);
+      } catch {}
     }
 
+    // Summary error: only fail the whole selftest if health or stream fails.
+    if (!out.health.ok && !out.error) out.error = "health failed";
+    if (!out.stream.ok && !out.error) out.error = out.stream.error ? `stream: ${out.stream.error}` : "stream failed";
     return out;
   } catch (e) {
     out.error = String(e?.message || e);
@@ -413,9 +509,34 @@ let _healthInFlight = null; // Promise<boolean> | null
 const HEALTH_COOLDOWN_MS = 2500;
 
 // Streaming handles
-let streamingMsg = null; // { convId, msgId, contentEl, textNode, cursorEl }
+let streamingMsg = null; // { convId, msgId, contentEl, textNode, cursorEl, hasFirstChunk, thinkingEl, thinkingTimer, sources, artifacts }
 let streamBuffer = "";
 let streamFlushRaf = 0;
+
+function flushStreamNow() {
+  if (!streamingMsg) return;
+  ensureStreamingBind();
+  if (streamFlushRaf) {
+    try {
+      cancelAnimationFrame(streamFlushRaf);
+    } catch {}
+    streamFlushRaf = 0;
+  }
+  if (!streamBuffer) return;
+
+  try {
+    streamingMsg.textNode?.appendData?.(streamBuffer);
+  } catch {}
+
+  try {
+    const conv = conversations.find((c) => c.id === streamingMsg.convId);
+    const msg = conv?.messages?.find((m) => m.id === streamingMsg.msgId);
+    if (msg) msg.content = String(msg.content || "") + streamBuffer;
+  } catch {}
+
+  streamBuffer = "";
+  scrollToBottomIfNeeded();
+}
 
 // Markdown
 function getMd() {
@@ -430,7 +551,7 @@ function getMd() {
         typographer: true,
       });
     }
-  } catch { }
+  } catch {}
   return null;
 }
 const md = getMd();
@@ -446,7 +567,7 @@ let _faviconIconPromise = null;
 
 function syncBrowserTitle() {
   const c = getSelectedConversation();
-  const title = c ? `${String(c.title || "Conversa").trim() || "Conversa"} \u2013 ${APP_TITLE}` : APP_TITLE;
+  const title = c ? `${String(c.title || "Conversa").trim() || "Conversa"} – ${APP_TITLE}` : APP_TITLE;
   if (title === _lastBrowserTitle) return;
   _lastBrowserTitle = title;
   document.title = title;
@@ -508,7 +629,6 @@ async function syncFavicon() {
     _faviconActiveHref = canvas.toDataURL("image/png");
     link.setAttribute("href", _faviconActiveHref);
   } catch {
-    // fallback: keep base favicon
     link.setAttribute("href", _faviconBaseHref);
   }
 }
@@ -555,14 +675,16 @@ async function fetchWithRetry(url, options, retry = { retries: 1, delayMs: 360 }
 async function pingBackendHealth(timeoutMs = 900) {
   const base = String(BACKEND_BASE || "").trim();
   const now = Date.now();
-  if (base && base === _healthLastBase && _healthLastOk !== null && (now - _healthLastAt) < HEALTH_COOLDOWN_MS) {
+  if (base && base === _healthLastBase && _healthLastOk !== null && now - _healthLastAt < HEALTH_COOLDOWN_MS) {
     return _healthLastOk;
   }
   if (_healthInFlight && base && base === _healthLastBase) return await _healthInFlight;
 
   const ac = new AbortController();
   const timer = window.setTimeout(() => {
-    try { ac.abort(); } catch { }
+    try {
+      ac.abort();
+    } catch {}
   }, timeoutMs);
 
   _healthLastBase = base;
@@ -573,7 +695,9 @@ async function pingBackendHealth(timeoutMs = 900) {
     } catch {
       return false;
     } finally {
-      try { clearTimeout(timer); } catch { }
+      try {
+        clearTimeout(timer);
+      } catch {}
     }
   })();
 
@@ -586,12 +710,11 @@ async function pingBackendHealth(timeoutMs = 900) {
 
 function getAlternateBackendBases() {
   const bases = [];
-  const cur = String(BACKEND_BASE || "").trim();
-  const local = "http://localhost:8000";
+  const raw = String(BACKEND_BASE || "").trim();
+  const cur = raw === "http://localhost:8000" ? "http://127.0.0.1:8000" : raw;
   const ip = "http://127.0.0.1:8000";
 
   if (cur) bases.push(cur);
-  if (!bases.includes(local)) bases.push(local);
   if (!bases.includes(ip)) bases.push(ip);
 
   return bases;
@@ -605,7 +728,9 @@ async function ensureBackendBaseOnline() {
     const ok = await pingBackendHealth(900);
     if (ok) {
       backendOnline = true;
-      try { localStorage.setItem(BACKEND_BASE_KEY, base); } catch { }
+      try {
+        localStorage.setItem(BACKEND_BASE_KEY, base);
+      } catch {}
       if (prev !== base) toast(`Backend conectado: ${base}`, { ms: 1800 });
       return true;
     }
@@ -644,11 +769,20 @@ function syncTopbarSubtitle() {
     return;
   }
 
-  el.currentSub.textContent = isGenerating ? "Gerando…" : "Pronto";
+  if (isGenerating) {
+    el.currentSub.textContent = "Gerando…";
+    return;
+  }
+
+  el.currentSub.textContent = streamingEnabled ? "Pronto" : "Pronto — Streaming desligado";
 }
 
 function safeJsonParse(s) {
-  try { return JSON.parse(s); } catch { return null; }
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
 }
 
 function toast(msg, { ms = 2200 } = {}) {
@@ -658,6 +792,10 @@ function toast(msg, { ms = 2200 } = {}) {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => (el.toast.hidden = true), ms);
 }
+// Expose for diagnostics (DevTools) and early crash hooks.
+try {
+  window.toast = toast;
+} catch {}
 
 async function copyToClipboard(text) {
   const t = String(text || "");
@@ -692,7 +830,7 @@ function getSystemTheme() {
 function readStoredTheme() {
   try {
     const t = localStorage.getItem(THEME_KEY);
-    return (t === "dark" || t === "light") ? t : null;
+    return t === "dark" || t === "light" ? t : null;
   } catch {
     return null;
   }
@@ -718,10 +856,12 @@ function updateResponseModeButton() {
 }
 
 function applyTheme(theme, { persist } = { persist: false }) {
-  const t = (theme === "dark" || theme === "light") ? theme : "light";
+  const t = theme === "dark" || theme === "light" ? theme : "light";
   document.documentElement.setAttribute("data-theme", t);
   if (persist) {
-    try { localStorage.setItem(THEME_KEY, t); } catch { }
+    try {
+      localStorage.setItem(THEME_KEY, t);
+    } catch {}
   }
   updateThemeToggleIcon();
 }
@@ -733,7 +873,7 @@ function initTheme() {
     mq.addEventListener?.("change", () => {
       if (!readStoredTheme()) applyTheme(getSystemTheme(), { persist: false });
     });
-  } catch { }
+  } catch {}
 }
 
 // =============================
@@ -741,27 +881,26 @@ function initTheme() {
 // =============================
 function loadState() {
   const raw = (() => {
-    try { return localStorage.getItem(STORAGE_KEY); } catch { return null; }
+    try {
+      return localStorage.getItem(STORAGE_KEY);
+    } catch {
+      return null;
+    }
   })();
   const parsed = raw ? safeJsonParse(raw) : null;
   const list = Array.isArray(parsed) ? parsed : [];
 
-  conversations = list
-    .map((c) => normalizeConversation(c))
-    .filter(Boolean);
+  conversations = list.map((c) => normalizeConversation(c)).filter(Boolean);
 
-  // most recent first
   conversations.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
 
-  // Restore last selected conversation when possible (prevents "chat looks stuck" after refresh).
   selectedConversationId = null;
   try {
     const saved = String(localStorage.getItem(STORAGE_SELECTED) || "").trim();
     if (saved && conversations.some((c) => c.id === saved)) {
       selectedConversationId = saved;
     }
-  } catch { }
-  // If there is only one conversation, auto-open it for better UX.
+  } catch {}
   if (!selectedConversationId && conversations.length === 1) {
     selectedConversationId = conversations[0].id;
   }
@@ -769,7 +908,6 @@ function loadState() {
   try {
     const v = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
     if (v == null) {
-      // compat: migra do key antigo, se existir
       const legacy = localStorage.getItem("paytech.sidebarCollapsed");
       if (legacy != null) localStorage.setItem(SIDEBAR_COLLAPSED_KEY, legacy);
     }
@@ -793,7 +931,7 @@ function loadState() {
   try {
     const v = String(localStorage.getItem(STREAMING_ENABLED_KEY) || "").trim().toLowerCase();
     if (!v) streamingEnabled = true;
-    else streamingEnabled = (v === "1" || v === "true" || v === "on" || v === "yes");
+    else streamingEnabled = v === "1" || v === "true" || v === "on" || v === "yes";
   } catch {
     streamingEnabled = true;
   }
@@ -810,12 +948,24 @@ function loadState() {
 }
 
 function persistState() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations)); } catch { }
-  try { localStorage.setItem(STORAGE_SELECTED, selectedConversationId || ""); } catch { }
-  try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0"); } catch { }
-  try { localStorage.setItem(RESPONSE_MODE_KEY, normalizeMode(responseMode)); } catch { }
-  try { localStorage.setItem(STREAMING_ENABLED_KEY, streamingEnabled ? "1" : "0"); } catch { }
-  try { if (userId) localStorage.setItem(USER_ID_KEY, userId); } catch { }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
+  } catch {}
+  try {
+    localStorage.setItem(STORAGE_SELECTED, selectedConversationId || "");
+  } catch {}
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0");
+  } catch {}
+  try {
+    localStorage.setItem(RESPONSE_MODE_KEY, normalizeMode(responseMode));
+  } catch {}
+  try {
+    localStorage.setItem(STREAMING_ENABLED_KEY, streamingEnabled ? "1" : "0");
+  } catch {}
+  try {
+    if (userId) localStorage.setItem(USER_ID_KEY, userId);
+  } catch {}
 }
 
 function normalizeConversation(c) {
@@ -833,18 +983,21 @@ function normalizeConversation(c) {
 function normalizeMessage(m) {
   if (!m || typeof m !== "object") return null;
   const id = String(m.id || "").trim() || uuid();
-  const role = (m.role === "user" || m.role === "assistant" || m.role === "system") ? m.role : "assistant";
+  const role = m.role === "user" || m.role === "assistant" || m.role === "system" ? m.role : "assistant";
   const content = String(m.content || "");
   const ts = String(m.ts || nowISO());
-  const attachments = Array.isArray(m.attachments) ? m.attachments.map((a) => ({
-    name: String(a?.name || ""),
-    type: String(a?.type || ""),
-    size: Number(a?.size || 0),
-  })) : [];
+  const attachments = Array.isArray(m.attachments)
+    ? m.attachments.map((a) => ({
+        name: String(a?.name || ""),
+        type: String(a?.type || ""),
+        size: Number(a?.size || 0),
+      }))
+    : [];
   const interrupted = !!m.interrupted;
-  const sources = Array.isArray(m.sources) ? m.sources : [];
+  const sources = [];
   const artifacts = Array.isArray(m.artifacts) ? m.artifacts : [];
-  return { id, role, content, ts, attachments, interrupted, sources, artifacts };
+  const sourcesRequested = !!m.sourcesRequested;
+  return { id, role, content, ts, attachments, interrupted, sources, artifacts, sourcesRequested };
 }
 
 function getSelectedConversation() {
@@ -878,10 +1031,12 @@ function closeMenus({ restoreFocus = false } = {}) {
   }
   try {
     if (anchor?.classList?.contains?.("kebab")) anchor.setAttribute("aria-expanded", "false");
-  } catch { }
+  } catch {}
   lastMenuAnchorEl = null;
   if (restoreFocus && anchor && document.contains(anchor)) {
-    try { anchor.focus(); } catch { }
+    try {
+      anchor.focus();
+    } catch {}
   }
 }
 
@@ -903,10 +1058,14 @@ function normalizeMode(m) {
 
 function labelForMode(m) {
   switch (normalizeMode(m)) {
-    case "resumido": return "Resumido";
-    case "didatico": return "Didático";
-    case "estrategico": return "Estratégico";
-    default: return "Técnico";
+    case "resumido":
+      return "Resumido";
+    case "didatico":
+      return "Didático";
+    case "estrategico":
+      return "Estratégico";
+    default:
+      return "Técnico";
   }
 }
 
@@ -951,6 +1110,7 @@ function openModeMenu(anchorEl) {
 }
 
 function renderItemMenu(convId) {
+  if (!el.itemMenu) return;
   el.itemMenu.innerHTML = `
     <button class="menu-item" data-action="rename" data-id="${convId}" role="menuitem">Renomear</button>
     <button class="menu-item" data-action="delete" data-id="${convId}" role="menuitem">Excluir</button>
@@ -959,16 +1119,20 @@ function renderItemMenu(convId) {
 }
 
 function openItemMenu(anchorEl, convId) {
+  if (!el.itemMenu) return;
   closeMenus();
   renderItemMenu(convId);
   el.itemMenu.hidden = false;
   menuPosition(el.itemMenu, anchorEl);
   lastMenuAnchorEl = anchorEl;
-  try { anchorEl?.setAttribute?.("aria-expanded", "true"); } catch { }
+  try {
+    anchorEl?.setAttribute?.("aria-expanded", "true");
+  } catch {}
   el.itemMenu.querySelector("button.menu-item")?.focus?.();
 }
 
 function renderExportMenu(convId) {
+  if (!el.exportMenu) return;
   el.exportMenu.innerHTML = `
     <div class="menu-title">Baixar conversa</div>
     <button class="menu-item" data-action="export-docx" data-id="${convId}" role="menuitem">
@@ -983,20 +1147,17 @@ function renderExportMenu(convId) {
 }
 
 function openExportMenu(anchorEl, convId) {
-  // Important: don't call closeMenus() here because it clears the itemMenu DOM,
-  // which would detach the clicked "Baixar conversa" button and break anchoring
-  // on some browsers (menu opens in a weird place / appears not to open).
   if (el.itemMenu) {
     el.itemMenu.hidden = true;
     el.itemMenu.innerHTML = "";
   }
   renderExportMenu(convId);
+  if (!el.exportMenu) return;
   el.exportMenu.hidden = false;
   menuPosition(el.exportMenu, anchorEl);
   lastMenuAnchorEl = anchorEl;
   el.exportMenu.querySelector("button.menu-item")?.focus?.();
 }
-
 
 // =============================
 // Rendering
@@ -1004,7 +1165,7 @@ function openExportMenu(anchorEl, convId) {
 function renderHeader() {
   const c = getSelectedConversation();
   const active = !!c;
-  el.currentTitle.textContent = active ? (c?.title || "Conversa") : "";
+  if (el.currentTitle) el.currentTitle.textContent = active ? (c?.title || "Conversa") : "";
   syncTopbarSubtitle();
   syncBrowserTitle();
 }
@@ -1015,15 +1176,16 @@ function renderLayout() {
   if (el.emptyState) el.emptyState.hidden = active;
   if (el.toBottomBtn) el.toBottomBtn.hidden = true;
   if (!active) {
-    try { el.thread?.replaceChildren?.(); } catch { }
+    try {
+      el.thread?.replaceChildren?.();
+    } catch {}
   }
 }
 
 function renderSidebarList() {
+  if (!el.conversationList) return;
   const q = (searchQuery || "").trim().toLowerCase();
-  const list = q
-    ? conversations.filter((c) => (c.title || "").toLowerCase().includes(q))
-    : conversations;
+  const list = q ? conversations.filter((c) => (c.title || "").toLowerCase().includes(q)) : conversations;
 
   el.conversationList.replaceChildren();
   const frag = document.createDocumentFragment();
@@ -1068,11 +1230,7 @@ function renderSidebarList() {
 }
 
 function clearThread() {
-  el.thread.replaceChildren();
-  // If a stream is in-flight, keep the logical handle so:
-  // - watchdog fallback can still fire
-  // - deltas can re-bind to the new DOM after a rerender/navigation
-  // We drop DOM pointers because they are no longer valid after replaceChildren().
+  el.thread?.replaceChildren?.();
   if (streamingMsg) {
     streamingMsg.contentEl = null;
     streamingMsg.textNode = null;
@@ -1080,7 +1238,10 @@ function clearThread() {
     streamingMsg.thinkingEl = null;
   }
   streamBuffer = "";
-  if (streamFlushRaf) { cancelAnimationFrame(streamFlushRaf); streamFlushRaf = 0; }
+  if (streamFlushRaf) {
+    cancelAnimationFrame(streamFlushRaf);
+    streamFlushRaf = 0;
+  }
 }
 
 function ensureStreamingBind() {
@@ -1094,7 +1255,11 @@ function ensureStreamingBind() {
     const contentEl = article?.querySelector?.(".content");
     if (!contentEl) return false;
 
-    const isSame = streamingMsg.contentEl === contentEl && streamingMsg.textNode && streamingMsg.textNode.isConnected;
+    const isSame =
+      streamingMsg.contentEl === contentEl &&
+      streamingMsg.textNode &&
+      streamingMsg.textNode.isConnected;
+
     if (isSame) return true;
 
     const textNode = document.createTextNode(existingText);
@@ -1107,10 +1272,8 @@ function ensureStreamingBind() {
     streamingMsg.textNode = textNode;
     streamingMsg.cursorEl = cursor;
     streamingMsg.thinkingEl = null;
-    // If we already have content, mark as started so we don't re-insert thinking.
     if (existingText.trim()) streamingMsg.hasFirstChunk = true;
 
-    // Re-show thinking if we still haven't received the first chunk.
     if (!streamingMsg.hasFirstChunk) {
       try {
         const t = document.createElement("span");
@@ -1118,7 +1281,7 @@ function ensureStreamingBind() {
         t.textContent = streamingMsg.thinkingText || "Analisando…";
         streamingMsg.thinkingEl = t;
         contentEl.insertBefore(t, cursor);
-      } catch { }
+      } catch {}
     }
 
     ptLog("stream:rebind", { convId: streamingMsg.convId, msgId: streamingMsg.msgId, hasText: !!existingText.trim() });
@@ -1131,7 +1294,7 @@ function ensureStreamingBind() {
 function renderThread() {
   clearThread();
   const c = getSelectedConversation();
-  if (!c) return;
+  if (!c || !el.thread) return;
   const frag = document.createDocumentFragment();
   for (const m of c.messages) {
     frag.appendChild(buildMessageEl(m));
@@ -1159,14 +1322,11 @@ function buildMessageEl(msg) {
       status.textContent = "(interrompido)";
       article.appendChild(status);
     }
-    if (Array.isArray(msg.sources) && msg.sources.length) {
-      renderSources(content, msg.sources);
-    }
+    // UX rule: never render sources in chat messages.
     if (Array.isArray(msg.artifacts) && msg.artifacts.length) {
       renderArtifacts(content, msg.artifacts);
     }
   } else {
-    // user: leitura limpa (sem markdown pesado aqui)
     content.textContent = msg.content || "";
     if (msg.attachments?.length) {
       const files = document.createElement("div");
@@ -1268,10 +1428,7 @@ function renderAssistantContent(container, markdown) {
   }
 
   const html = md.render(raw);
-  // sanitize then insert once
-  const safe = window.DOMPurify.sanitize(html, {
-    USE_PROFILES: { html: true },
-  });
+  const safe = window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
   container.innerHTML = safe;
   enhanceCodeBlocks(container);
 }
@@ -1302,7 +1459,7 @@ function enhanceCodeBlocks(container) {
 
 function appendMessageToThread(msg) {
   const node = buildMessageEl(msg);
-  el.thread.appendChild(node);
+  el.thread?.appendChild?.(node);
   return node;
 }
 
@@ -1332,6 +1489,7 @@ function scrollToBottomIfNeeded() {
 // Composer: files + autosize
 // =============================
 function renderFileChips() {
+  if (!el.fileChips) return;
   if (!pendingFiles.length) {
     el.fileChips.hidden = true;
     el.fileChips.replaceChildren();
@@ -1397,7 +1555,9 @@ function goHome() {
   renderSidebarList();
   renderThread();
   updateComposerControls();
-  try { el.emptyInput?.focus?.(); } catch { }
+  try {
+    el.emptyInput?.focus?.();
+  } catch {}
 }
 
 function renameConversation(id) {
@@ -1467,7 +1627,7 @@ async function maybeAutoTitleConversation(convId) {
   const firstAssistant = String(assistants[0]?.content || "").trim();
   if (!firstUser || !firstAssistant) return;
 
-  conv.titleAutoDone = true; // avoid duplicate calls
+  conv.titleAutoDone = true;
   upsertConversation(conv);
   persistState();
 
@@ -1497,18 +1657,19 @@ async function maybeAutoTitleConversation(convId) {
       renderHeader();
       renderSidebarList();
     }
-  } catch {
-    // keep local title
-  }
+  } catch {}
 }
 
 function readComposerText() {
   const main = String(el.input?.value || "");
   const empty = String(el.emptyInput?.value || "");
-  if (hasActiveConversation()) return main;
-  // Empty-state UX: users may type in the bottom composer instead of the center composer.
-  // Accept whichever has content to avoid "send does nothing".
-  return empty.trim() ? empty : main;
+
+  // Defensive: users sometimes type in the "other" textarea (empty-state vs main composer)
+  // depending on focus/scroll/layout. Accept whichever has content to avoid "send does nothing".
+  if (main.trim()) return main;
+  if (empty.trim()) return empty;
+
+  return hasActiveConversation() ? main : empty;
 }
 
 function clearComposerText() {
@@ -1523,8 +1684,12 @@ function clearComposerText() {
 }
 
 function focusComposer() {
-  const target = hasActiveConversation() ? el.input : el.emptyInput;
-  try { target?.focus?.(); } catch { }
+  const main = String(el.input?.value || "");
+  const empty = String(el.emptyInput?.value || "");
+  const target = main.trim() ? el.input : (empty.trim() ? el.emptyInput : (hasActiveConversation() ? el.input : el.emptyInput));
+  try {
+    target?.focus?.();
+  } catch {}
 }
 
 function autoResizeEmpty() {
@@ -1549,7 +1714,9 @@ function setGenerating(on) {
   if (el.attachBtn) el.attachBtn.disabled = isGenerating;
   updateComposerControls();
   syncFavicon();
-  try { el.chat?.setAttribute?.("aria-busy", isGenerating ? "true" : "false"); } catch { }
+  try {
+    el.chat?.setAttribute?.("aria-busy", isGenerating ? "true" : "false");
+  } catch {}
   renderHeader();
 }
 
@@ -1560,23 +1727,20 @@ function canSendNow() {
 }
 
 function updateComposerControls() {
-  const main = String(el.input?.value || "").trim();
-  const empty = String(el.emptyInput?.value || "").trim();
-  const text = hasActiveConversation() ? main : (empty || main);
+  const text = readComposerText().trim();
   const hasPayload = !!text || pendingFiles.length > 0;
 
-  // Main action button: when generating it becomes "Stop" and must remain clickable.
-  // Don't hard-disable: disabled buttons don't dispatch click events and the UI feels "stuck".
-  // We gate in `sendMessage()` and show a toast when empty.
   if (el.sendBtn) {
-    el.sendBtn.disabled = false;
-    el.sendBtn.setAttribute("aria-disabled", String(!isGenerating && !hasPayload));
+    // When generating, the send button acts as "Stop" and must stay enabled.
+    const disabled = !isGenerating && !hasPayload;
+    el.sendBtn.disabled = disabled;
+    el.sendBtn.setAttribute("aria-disabled", String(disabled));
   }
 
-  // Empty-state send is never used as "Stop"; disable during generation and when empty.
   if (el.emptySendBtn) {
-    el.emptySendBtn.disabled = false;
-    el.emptySendBtn.setAttribute("aria-disabled", String(isGenerating || !hasPayload));
+    const disabled = !isGenerating && !hasPayload;
+    el.emptySendBtn.disabled = disabled;
+    el.emptySendBtn.setAttribute("aria-disabled", String(disabled));
   }
 }
 
@@ -1588,17 +1752,21 @@ function buildBackendMessages(conv) {
 }
 
 function effectiveUseDownloads() {
-  // If the user enabled "use downloads" but there are no documents, avoid wasting time on tool phase.
   if (!useDownloadsInChat) return false;
-  // If we don't know yet (user never opened downloads panel), be optimistic:
-  // the backend will quickly return zero hits if there are no documents.
   if (downloadsFileCount == null) return true;
   if (downloadsFileCount === 0) return false;
   return true;
 }
 
-function startStreamingIntoMessage({ convId, msgId, contentEl }) {
-  // single node update: TextNode + cursor
+function startStreamingIntoMessage({ convId, msgId, contentEl, sourcesRequested = false }) {
+  if (!contentEl) {
+    try {
+      const article = el.thread?.querySelector?.(`article.msg[data-msg-id="${msgId}"]`);
+      contentEl = article?.querySelector?.(".content") || null;
+    } catch {}
+  }
+  if (!contentEl) return false;
+
   const textNode = document.createTextNode("");
   contentEl.replaceChildren(textNode);
   const cursor = document.createElement("span");
@@ -1613,24 +1781,20 @@ function startStreamingIntoMessage({ convId, msgId, contentEl }) {
     cursorEl: cursor,
     hasFirstChunk: false,
     thinkingEl: null,
-    thinkingText: "Analisando…",
     sources: null,
     artifacts: null,
-    thinkingTimer: window.setTimeout(() => {
-      if (!streamingMsg || streamingMsg.msgId !== msgId) return;
-      if (streamingMsg.hasFirstChunk) return;
-      const conv = conversations.find((c) => c.id === convId);
-      const msg = conv?.messages?.find((m) => m.id === msgId);
-      if (!msg || (msg.content || "").trim()) return;
-      const t = document.createElement("span");
-      t.className = "thinking";
-      t.textContent = streamingMsg.thinkingText || "Analisando…";
-      streamingMsg.thinkingEl = t;
-      try { contentEl.insertBefore(t, cursor); } catch { }
-    }, 260),
+    sourcesRequested: !!sourcesRequested,
+    thinkingText: "Analisando…",
+    thinkingTimer: 0,
   };
+  // Make the assistant bubble visibly "alive" immediately (no silent blank state).
+  ensureThinkingVisible();
   streamBuffer = "";
-  if (streamFlushRaf) { cancelAnimationFrame(streamFlushRaf); streamFlushRaf = 0; }
+  if (streamFlushRaf) {
+    cancelAnimationFrame(streamFlushRaf);
+    streamFlushRaf = 0;
+  }
+  return true;
 }
 
 function setThinkingStatus(nextText) {
@@ -1641,7 +1805,7 @@ function setThinkingStatus(nextText) {
   streamingMsg.thinkingText = t;
   try {
     if (streamingMsg.thinkingEl) streamingMsg.thinkingEl.textContent = t;
-  } catch { }
+  } catch {}
 }
 
 function ensureThinkingVisible() {
@@ -1655,7 +1819,7 @@ function ensureThinkingVisible() {
     t.textContent = streamingMsg.thinkingText || "Analisando…";
     streamingMsg.thinkingEl = t;
     streamingMsg.contentEl?.insertBefore?.(t, streamingMsg.cursorEl);
-  } catch { }
+  } catch {}
 }
 
 function setStreamingSources(items) {
@@ -1674,7 +1838,9 @@ function streamAppend(text) {
   ensureStreamingBind();
   if (!streamingMsg.hasFirstChunk) {
     streamingMsg.hasFirstChunk = true;
-    try { streamingMsg.thinkingEl?.remove?.(); } catch { }
+    try {
+      streamingMsg.thinkingEl?.remove?.();
+    } catch {}
     streamingMsg.thinkingEl = null;
     if (streamingMsg.thinkingTimer) {
       clearTimeout(streamingMsg.thinkingTimer);
@@ -1686,24 +1852,43 @@ function streamAppend(text) {
   streamFlushRaf = requestAnimationFrame(() => {
     streamFlushRaf = 0;
     if (!streamingMsg || !streamBuffer) return;
-    streamingMsg.textNode.appendData(streamBuffer);
-    // keep state in-memory in sync
+    streamingMsg.textNode?.appendData?.(streamBuffer);
+
     const conv = conversations.find((c) => c.id === streamingMsg.convId);
     const msg = conv?.messages?.find((m) => m.id === streamingMsg.msgId);
-    if (msg) msg.content += streamBuffer;
+    if (msg) msg.content = String(msg.content || "") + streamBuffer;
+
     streamBuffer = "";
     scrollToBottomIfNeeded();
   });
 }
 
-function finalizeStreaming({ ok, errorMessage } = { ok: true }) {
+/**
+ * ✅ FIX CRÍTICO:
+ * Antes você chamava finalizeStreaming({ ok: true, sources }) mas a função não aceitava sources/artifacts.
+ * Agora aceita `sources` e `artifacts` (opcionais), e também usa o que estiver em `streamingMsg` quando não passar.
+ */
+function finalizeStreaming({ ok, errorMessage, sources, artifacts } = { ok: true }) {
   if (!streamingMsg) return;
-  const { convId, msgId, sources, artifacts } = streamingMsg;
+
+  // Critical: deltas are buffered + flushed via rAF. If many SSE events arrive in one JS tick,
+  // we can finalize before the rAF runs, making the UI look empty even though Network shows data.
+  flushStreamNow();
+
+  const { convId, msgId } = streamingMsg;
   const contentEl = streamingMsg.contentEl;
   const cursorEl = streamingMsg.cursorEl;
-  try { streamingMsg.thinkingEl?.remove?.(); } catch { }
+
+  const finalSources = [];
+  const finalArtifacts = Array.isArray(artifacts) ? artifacts : Array.isArray(streamingMsg.artifacts) ? streamingMsg.artifacts : [];
+
+  try {
+    streamingMsg.thinkingEl?.remove?.();
+  } catch {}
   if (streamingMsg.thinkingTimer) clearTimeout(streamingMsg.thinkingTimer);
-  try { cursorEl?.remove?.(); } catch { }
+  try {
+    cursorEl?.remove?.();
+  } catch {}
 
   const conv = conversations.find((c) => c.id === convId);
   const msg = conv?.messages?.find((m) => m.id === msgId);
@@ -1719,13 +1904,11 @@ function finalizeStreaming({ ok, errorMessage } = { ok: true }) {
     if (contentEl) renderAssistantContent(contentEl, msg.content);
   }
 
-  if (sources && Array.isArray(sources) && sources.length) {
-    msg.sources = sources;
-    if (contentEl) renderSources(contentEl, sources);
-  }
-  if (artifacts && Array.isArray(artifacts) && artifacts.length) {
-    msg.artifacts = artifacts;
-    if (contentEl) renderArtifacts(contentEl, artifacts);
+  msg.sources = [];
+  msg.sourcesRequested = false;
+  if (finalArtifacts.length) {
+    msg.artifacts = finalArtifacts;
+    if (contentEl) renderArtifacts(contentEl, finalArtifacts);
   }
 
   streamingMsg = null;
@@ -1734,14 +1917,16 @@ function finalizeStreaming({ ok, errorMessage } = { ok: true }) {
   persistState();
   renderSidebarList();
 
-  // Auto-title after the first assistant reply (non-blocking)
   if (ok) setTimeout(() => maybeAutoTitleConversation(convId), 0);
 }
 
 function finalizeStreamingInterrupted() {
   if (!streamingMsg) return;
+  flushStreamNow();
   const { convId, msgId, contentEl, cursorEl } = streamingMsg;
-  try { streamingMsg.thinkingEl?.remove?.(); } catch { }
+  try {
+    streamingMsg.thinkingEl?.remove?.();
+  } catch {}
   if (streamingMsg.thinkingTimer) clearTimeout(streamingMsg.thinkingTimer);
   if (cursorEl) cursorEl.remove();
 
@@ -1753,8 +1938,12 @@ function finalizeStreamingInterrupted() {
   }
 
   msg.interrupted = true;
-  renderAssistantContent(contentEl, msg.content || "");
-  const article = contentEl.closest?.(".msg");
+  if (!String(msg.content || "").trim()) {
+    msg.content = "Geração interrompida.";
+  }
+  if (contentEl) renderAssistantContent(contentEl, msg.content || "");
+
+  const article = contentEl?.closest?.(".msg");
   if (article && !article.querySelector(".msg-status")) {
     const status = document.createElement("div");
     status.className = "msg-status";
@@ -1769,11 +1958,44 @@ function finalizeStreamingInterrupted() {
   renderSidebarList();
 }
 
+function userAskedForSourcesFromText(text) {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return false;
+
+  if (
+    t.startsWith("/fontes") ||
+    t.startsWith("/kb") ||
+    t.startsWith("/buscar") ||
+    t.startsWith("/pesquisar")
+  ) {
+    return true;
+  }
+
+  if (
+    t.includes("cite as fontes") ||
+    t.includes("mostrar fontes") ||
+    t.includes("mostre fontes") ||
+    t.includes("quais fontes") ||
+    t.includes("de onde veio")
+  ) {
+    return true;
+  }
+
+  const asksComprovante = t.includes("comprovante");
+  const asksLookup = ["buscar", "busque", "procurar", "procure", "pesquisar", "pesquise", "consultar", "consulte"].some((v) => t.includes(v));
+  return asksComprovante && asksLookup;
+}
+
 async function sendMessage() {
+  try {
+    console.count("sendMessage");
+  } catch {}
+
   ptLog("sendMessage:enter", { isGenerating, hasActiveConversation: hasActiveConversation(), pendingFiles: pendingFiles.length });
   if (isGenerating) return;
+  if (sendInFlight) return;
+  sendInFlight = true;
 
-  // Capture raw composer values BEFORE any UI clears them (useful for debugging "I typed but it says empty").
   const mainRaw = String(el.input?.value || "");
   const emptyRaw = String(el.emptyInput?.value || "");
   ptLog("sendMessage:composer:raw", {
@@ -1784,15 +2006,16 @@ async function sendMessage() {
   });
 
   const text = readComposerText().trim();
+  const userAskedForSources = userAskedForSourcesFromText(text);
   ptLog("sendMessage:composer", { textLen: text.length });
   if (!text && pendingFiles.length === 0) {
     ptLog("sendMessage:empty", { mainLen: mainRaw.length, emptyLen: emptyRaw.length });
     toast("Digite uma mensagem ou anexe um arquivo.");
     focusComposer();
+    sendInFlight = false;
     return;
   }
 
-  // Create a conversation on first message (empty state -> active thread)
   let conv = getSelectedConversation();
   const creating = !conv;
   if (!conv) {
@@ -1807,13 +2030,14 @@ async function sendMessage() {
     renderSidebarList();
     renderThread();
     setTimeout(() => {
-      try { el.input?.focus?.(); } catch { }
+      try {
+        el.input?.focus?.();
+      } catch {}
     }, 0);
   }
 
   const filesToSend = pendingFiles.slice();
 
-  // pinned logic snapshot (avoid forcing if user scrolled up)
   pinnedToBottom = isNearBottom();
 
   const userMsg = {
@@ -1843,35 +2067,57 @@ async function sendMessage() {
   upsertConversation(conv);
   persistState();
 
-  // UI: append only the new nodes (não rerender do thread inteiro)
   appendMessageToThread(userMsg);
   const assistantNode = appendMessageToThread(assistantMsg);
-  const assistantContent = assistantNode.querySelector(".content");
-  startStreamingIntoMessage({ convId: conv.id, msgId: assistantMsg.id, contentEl: assistantContent });
+  const assistantContent =
+    assistantNode?.querySelector?.(".content") ||
+    el.thread?.querySelector?.(`article.msg[data-msg-id="${assistantMsg.id}"] .content`) ||
+    null;
+
+  // ✅ GUARD: evita crash silencioso quando o HTML não tem `.content`/`#thread`.
+  assistantMsg.sourcesRequested = userAskedForSources;
+  const okBind = startStreamingIntoMessage({ convId: conv.id, msgId: assistantMsg.id, contentEl: assistantContent, sourcesRequested: userAskedForSources });
+  if (!okBind) {
+    const err = "Falha ao iniciar thread (UI). Verifique se existe `#thread` e `.content` no HTML e se o DOM não foi recriado.";
+    ptLog("sendMessage:bind:fail", {
+      hasThread: !!el.thread,
+      assistantNodeTag: String(assistantNode?.tagName || ""),
+      assistantNodeHasContent: !!assistantNode?.querySelector?.(".content"),
+    });
+
+    // Make the failure visible in the assistant bubble (no silent failures).
+    assistantMsg.content = err;
+    conv.updatedAt = nowISO();
+    upsertConversation(conv);
+    persistState();
+    renderThread();
+    toast(err, { ms: 6500 });
+    sendInFlight = false;
+    return;
+  }
+
   scrollToBottomIfNeeded();
 
-  // reset composer
   clearComposerText();
   pendingFiles = [];
   renderFileChips();
-  el.fileInput.value = "";
+  try { if (el.fileInput) el.fileInput.value = ""; } catch {}
   updateComposerControls();
 
   setGenerating(true);
   ptLog("sendMessage:generating", { convId: conv.id });
   currentAbortController = new AbortController();
+
   let watchdogTimer = 0;
   let watchdogFallback = false;
   let emptyStreamDone = false;
-  let finalized = false;
+
   let uploadedDocsForThisMessage = false;
 
   const uploadFilesForChat = async (files) => {
-    const list = Array.isArray(files) ? files : (files ? [files] : []);
+    const list = Array.isArray(files) ? files : files ? [files] : [];
     if (!list.length) return false;
 
-    // Upload attachments into the Downloads library (same pipeline used by RAG/tools).
-    // Backend supports: POST /downloads/upload (multipart: files[])
     const fd = new FormData();
     for (const f of list) fd.append("files", f, f.name);
 
@@ -1890,13 +2136,20 @@ async function sendMessage() {
   const runChatFallback = async (reason) => {
     try {
       if (!streamingMsg) return false;
-      if (streamingMsg.hasFirstChunk) return false; // already streaming real tokens
+      if (streamingMsg.hasFirstChunk) return false;
 
       watchdogFallback = true;
       setTopbarStatus("Reconectando…");
       setThinkingStatus(String(reason || "Reconectando…"));
       ensureThinkingVisible();
-      try { currentAbortController?.abort?.(); } catch { }
+      try { currentAbortController?.abort?.(); } catch {}
+
+      // Before falling back to non-stream /chat, try to ensure we are pointing at a reachable backend.
+      // This mitigates common local issues (localhost IPv6 ::1 vs uvicorn bound to 127.0.0.1, reloads, etc.).
+      const baseBefore = String(BACKEND_BASE || "").trim();
+      const healthOk = await ensureBackendBaseOnline();
+      const baseAfter = String(BACKEND_BASE || "").trim();
+      ptLog("fetch:/chat:fallback:health", { ok: !!healthOk, baseBefore, baseAfter });
 
       const conv2 = conversations.find((c) => c.id === conv.id);
       const payload = {
@@ -1909,35 +2162,62 @@ async function sendMessage() {
         downloads_top_k: DOWNLOADS_TOP_K,
       };
 
-      const r2 = await fetchWithRetry(`${BACKEND_BASE}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const doPost = () =>
+        fetchWithRetry(
+          `${BACKEND_BASE}/chat`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+          { retries: 2, delayMs: 420 }
+        );
+
+      let r2 = null;
+      try {
+        r2 = await doPost();
+      } catch (e) {
+        // One more attempt after cycling backend base candidates.
+        const ok2 = await ensureBackendBaseOnline();
+        const baseRetry = String(BACKEND_BASE || "").trim();
+        ptLog("fetch:/chat:fallback:retry", { ok: !!ok2, base: baseRetry, err: String(e?.message || e || "") });
+        if (ok2) r2 = await doPost();
+        else throw e;
+      }
+
       ptLog("fetch:/chat:fallback:response", { status: r2.status, ok: r2.ok, ct: r2.headers?.get?.("content-type") || "" });
+
       if (!r2.ok) {
         const t2 = await r2.text().catch(() => "");
         finalizeStreaming({ ok: false, errorMessage: `Fallback /chat retornou ${r2.status}. ${t2 ? t2.slice(0, 240) : ""}`.trim() });
-        finalized = true;
         return true;
       }
+
       const data = await r2.json().catch(() => null);
       const reply = String(data?.reply || "").trim();
       if (!reply) {
         finalizeStreaming({ ok: false, errorMessage: "Fallback /chat retornou vazio." });
-        finalized = true;
         return true;
       }
 
       const conv3 = conversations.find((c) => c.id === conv.id);
       const msg3 = conv3?.messages?.find((m) => m.id === assistantMsg.id);
       if (msg3) msg3.content = reply;
-      finalizeStreaming({ ok: true });
-      finalized = true;
+
+      const sources = Array.isArray(data?.sources) ? data.sources : [];
+      const artifacts = Array.isArray(data?.artifacts) ? data.artifacts : [];
+      finalizeStreaming({ ok: true, sources: userAskedForSources ? sources : [], artifacts });
       return true;
     } catch (e) {
-      finalizeStreaming({ ok: false, errorMessage: `Falha no fallback /chat. ${String(e?.message || "")}`.trim() });
-      finalized = true;
+      const base = String(BACKEND_BASE || "").trim();
+      const ok = await pingBackendHealth(900).catch(() => false);
+      const hints = ok
+        ? "O backend respondeu ao /health. Isso costuma ser bloqueio do navegador (CORS/mixed-content) ou um erro de rede momentâneo."
+        : "Backend parece offline. Inicie com backend/run_dev.ps1 (porta 8000) e confirme /health.";
+      finalizeStreaming({
+        ok: false,
+        errorMessage: `Falha no fallback /chat (${base}). ${String(e?.message || "")}`.trim() + `\n${hints}`,
+      });
       return true;
     } finally {
       clearTopbarStatus();
@@ -1945,8 +2225,13 @@ async function sendMessage() {
   };
 
   try {
-    // Non-stream mode: always use /chat (JSON) for maximum compatibility.
     if (!streamingEnabled) {
+      const slowHintTimer = window.setTimeout(() => {
+        try {
+          toast("Streaming está desligado; /chat pode demorar. Ative em Modo de resposta → Streaming.", { ms: 5200 });
+        } catch {}
+      }, 5000);
+
       if (filesToSend.length > 0) {
         toast("Anexos ainda não estão disponíveis sem streaming. Enviando só o texto.");
       }
@@ -1971,12 +2256,15 @@ async function sendMessage() {
         body: JSON.stringify(payload),
         signal: currentAbortController.signal,
       });
+      try {
+        clearTimeout(slowHintTimer);
+      } catch {}
+
       ptLog("fetch:/chat:response", { status: r.status, ok: r.ok, ct: r.headers?.get?.("content-type") || "" });
 
       if (!r.ok) {
         const t = await r.text().catch(() => "");
         finalizeStreaming({ ok: false, errorMessage: `Servidor retornou ${r.status}. ${t ? t.slice(0, 240) : ""}`.trim() });
-        finalized = true;
         return;
       }
 
@@ -1984,7 +2272,6 @@ async function sendMessage() {
       const reply = String(data?.reply || "").trim();
       if (!reply) {
         finalizeStreaming({ ok: false, errorMessage: "Resposta vazia do servidor." });
-        finalized = true;
         return;
       }
 
@@ -1993,8 +2280,8 @@ async function sendMessage() {
       if (msg2) msg2.content = reply;
 
       const sources = Array.isArray(data?.sources) ? data.sources : [];
-      finalizeStreaming({ ok: true, sources });
-      finalized = true;
+      const artifacts = Array.isArray(data?.artifacts) ? data.artifacts : [];
+      finalizeStreaming({ ok: true, sources: userAskedForSources ? sources : [], artifacts });
       return;
     }
 
@@ -2005,7 +2292,6 @@ async function sendMessage() {
       setThinkingStatus("Enviando documentos…");
       ensureThinkingVisible();
 
-      // Persist toggle so the user sees docs being used in subsequent messages too.
       setDownloadsUse(true);
 
       try {
@@ -2018,9 +2304,16 @@ async function sendMessage() {
       }
     }
 
-    const res = await fetchWithRetry(`${BACKEND_BASE}/chat/stream`, {
+    // Make it obvious (UI + logs) that we are about to connect to the stream.
+    setTopbarStatus("Conectando…");
+    setThinkingStatus("Conectando…");
+    ensureThinkingVisible();
+    const streamPath = DEBUG_STREAM_MODE ? "/debug/stream" : "/chat/stream";
+    ptLog("fetch:/chat/stream:start", { base: BACKEND_BASE, path: streamPath, hasFiles, useDownloads: effectiveUseDownloads() || uploadedDocsForThisMessage });
+
+    const res = await fetchWithRetry(`${BACKEND_BASE}${streamPath}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
       body: JSON.stringify({
         messages: buildBackendMessages(conv),
         user_id: userId,
@@ -2032,6 +2325,7 @@ async function sendMessage() {
       }),
       signal: currentAbortController.signal,
     });
+
     ptLog("fetch:/chat/stream:response", { status: res.status, ok: res.ok, ct: res.headers?.get?.("content-type") || "" });
 
     if (!res.ok) {
@@ -2042,23 +2336,32 @@ async function sendMessage() {
 
     const reader = res.body?.getReader();
     if (!reader) {
-      finalizeStreaming({ ok: false, errorMessage: "Resposta inválida do servidor (sem stream)." });
+      // Fallback: if streaming isn't available (older browsers/proxies), read the full body at once.
+      const t = await res.text().catch(() => "");
+      if (!t.trim()) {
+        finalizeStreaming({ ok: false, errorMessage: "Resposta inválida do servidor (sem stream)." });
+        return;
+      }
+      streamAppend(t);
+      clearTopbarStatus();
+      finalizeStreaming({ ok: true });
       return;
     }
 
     const contentType = String(res.headers?.get?.("content-type") || "").toLowerCase();
 
-    // If the stream stalls before the first chunk (proxy buffering/reload), fall back to non-streaming /chat.
     watchdogTimer = window.setTimeout(async () => {
       await runChatFallback("Sem resposta no streaming. Usando fallback…");
     }, 12000);
 
     if (contentType.includes("text/event-stream")) {
       let sawAnyDelta = false;
+
       await readSseStream(reader, {
         onStatus: (st) => {
           const phase = String(st?.phase || "").trim().toLowerCase();
           ptLog("sse:status", { phase });
+
           if (phase === "thinking") {
             setThinkingStatus("Analisando…");
             ensureThinkingVisible();
@@ -2068,10 +2371,8 @@ async function sendMessage() {
             ensureThinkingVisible();
             setTopbarStatus("Consultando documentos…");
           } else if (phase === "answer") {
-            // will be replaced by the first chunk soon
             clearTopbarStatus();
           } else if (phase === "done") {
-            // If server says done but we didn't get any tokens, fall back to /chat.
             if (!streamingMsg?.hasFirstChunk) {
               emptyStreamDone = true;
               return;
@@ -2104,7 +2405,6 @@ async function sendMessage() {
         },
       });
     } else {
-      // Back-compat: plain text stream (no SSE framing)
       const decoder = new TextDecoder();
       let sawAny = false;
       while (true) {
@@ -2125,12 +2425,13 @@ async function sendMessage() {
       finalizeStreaming({ ok: true });
     }
 
-    // If the stream ended without a terminal event, keep partial output and mark it interrupted.
     if (watchdogFallback) return;
+
     if (emptyStreamDone) {
       await runChatFallback("Stream finalizou sem tokens. Usando fallback…");
       return;
     }
+
     if (streamingMsg && streamingMsg.convId === conv.id) {
       const conv2 = conversations.find((c) => c.id === conv.id);
       const msg2 = conv2?.messages?.find((m) => m.id === assistantMsg.id);
@@ -2147,7 +2448,6 @@ async function sendMessage() {
     if (String(e?.name || "") === "AbortError") {
       if (!watchdogFallback) finalizeStreamingInterrupted();
     } else {
-      // Some environments/proxies block event-stream; try immediate non-stream fallback.
       const didFallback = await runChatFallback("Falha no streaming. Tentando fallback…");
       if (didFallback) return;
 
@@ -2160,23 +2460,30 @@ async function sendMessage() {
 
       finalizeStreaming({
         ok: false,
-        errorMessage: `Falha ao conectar ao backend (${BACKEND_BASE}). ${String(e?.message || "")}`.trim() + `\n${extra}`,
+        errorMessage:
+          `Falha ao conectar ao backend (${BACKEND_BASE}). ${String(e?.message || "")}`.trim() + `\n${extra}`,
       });
     }
   } finally {
     if (watchdogTimer) {
-      try { clearTimeout(watchdogTimer); } catch { }
+      try {
+        clearTimeout(watchdogTimer);
+      } catch {}
       watchdogTimer = 0;
     }
     setGenerating(false);
     currentAbortController = null;
     clearTopbarStatus();
+    sendInFlight = false;
   }
 }
 
 function stopGenerating() {
-  try { currentAbortController?.abort(); } catch { }
+  try {
+    currentAbortController?.abort();
+  } catch {}
   finalizeStreamingInterrupted();
+  toast("Geração interrompida.", { ms: 1800 });
   setGenerating(false);
   currentAbortController = null;
 }
@@ -2215,10 +2522,13 @@ async function readSseStream(reader, handlers) {
       if (inString) {
         if (esc) esc = false;
         else if (ch === "\\") esc = true;
-        else if (ch === "\"") inString = false;
+        else if (ch === '"') inString = false;
         continue;
       }
-      if (ch === "\"") { inString = true; continue; }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
       if (ch === "{" || ch === "[") depth++;
       if (ch === "}" || ch === "]") depth--;
       if (depth === 0) {
@@ -2242,13 +2552,25 @@ async function readSseStream(reader, handlers) {
       return;
     }
 
-    // Some backends send: "{...json meta...}text..." in the same data frame.
-    // Try splitting a leading JSON payload before extracting delta text.
     const split = splitLeadingJson(dataRaw);
     const jsonPrefix = split?.jsonText || null;
     const restAfterJson = split?.rest || "";
 
     const payload = safeJsonParse(jsonPrefix ?? dataRaw);
+
+    // Some SSE servers don't set `event:` and instead embed a `{type:"delta"|"status"|...}` inside data.
+    let eventName = String(event || "message").trim() || "message";
+    try {
+      if (
+        (eventName === "message" || eventName === "event") &&
+        payload &&
+        typeof payload === "object" &&
+        !Array.isArray(payload)
+      ) {
+        const t = String(payload.type || payload.event || "").trim();
+        if (t) eventName = t;
+      }
+    } catch {}
     const deltaText = (() => {
       const rest = (restAfterJson || "").trimStart();
       if (rest) return rest;
@@ -2263,37 +2585,37 @@ async function readSseStream(reader, handlers) {
       return dataRaw;
     })();
 
-    if (event === "delta") {
+    if (eventName === "delta") {
       handlers.onDelta?.(deltaText);
-    } else if (event === "status") {
+    } else if (eventName === "status") {
       handlers.onStatus?.(payload);
       if (payload && typeof payload === "object" && String(payload.phase || "").toLowerCase() === "done") {
         sawTerminal = true;
-        handlers.onDone?.(payload);
       }
       if (payload && typeof payload === "object" && String(payload.phase || "").toLowerCase() === "error") {
         sawTerminal = true;
       }
-    } else if (event === "meta") {
-      // metadata frame; do not render as assistant text
+    } else if (eventName === "meta") {
       handlers.onMeta?.(payload);
-    } else if (event === "sources") {
+    } else if (eventName === "sources") {
       handlers.onSources?.(payload);
-    } else if (event === "artifact") {
+    } else if (eventName === "artifact") {
       handlers.onArtifact?.(payload);
-    } else if (event === "citations") {
+    } else if (eventName === "citations") {
       handlers.onCitations?.(payload);
-    } else if (event === "error") {
+    } else if (eventName === "error") {
       sawTerminal = true;
       handlers.onError?.(payload || { message: "Erro." });
-    } else if (event === "done") {
+    } else if (eventName === "done") {
       sawTerminal = true;
       handlers.onDone?.(payload);
     } else {
-      // Back-compat: servers that omit `event:` (default "message") are treated as delta text.
-      // Avoid dumping JSON objects into the chat.
-      if (payload && typeof payload === "object" && !Array.isArray(payload)) return;
-      handlers.onDelta?.(deltaText);
+      // Fallback: if data looks like a text delta, render it; otherwise ignore structured payloads.
+      const looksLikeTextDelta =
+        typeof deltaText === "string" &&
+        deltaText !== "" &&
+        !(payload && typeof payload === "object" && !Array.isArray(payload) && jsonPrefix);
+      if (looksLikeTextDelta) handlers.onDelta?.(deltaText);
     }
     event = "message";
   };
@@ -2317,10 +2639,12 @@ async function readSseStream(reader, handlers) {
         event = line.slice(6).trim() || "message";
       } else if (line.startsWith("data:")) {
         dataLines.push(line.slice(5).trimStart());
+      } else {
+        // Ignore `id:`, `retry:`, comments, etc.
       }
     }
   }
-  // flush any pending event on stream end
+
   emit();
   return sawTerminal;
 }
@@ -2330,31 +2654,31 @@ async function readSseStream(reader, handlers) {
 // =============================
 function openSidebar() {
   if (window.matchMedia("(max-width: 900px)").matches) {
-    el.sidebar.classList.add("open");
-    el.overlay.hidden = false;
+    el.sidebar?.classList?.add?.("open");
+    if (el.overlay) el.overlay.hidden = false;
   }
 }
 
 function closeSidebarIfMobile() {
   if (window.matchMedia("(max-width: 900px)").matches) {
-    el.sidebar.classList.remove("open");
-    el.overlay.hidden = true;
+    el.sidebar?.classList?.remove?.("open");
+    if (el.overlay) el.overlay.hidden = true;
   }
 }
 
 function applySidebarCollapsed() {
   const isMobile = window.matchMedia("(max-width: 900px)").matches;
   if (isMobile) {
-    el.app.classList.remove("sb-collapsed");
+    el.app?.classList?.remove?.("sb-collapsed");
     return;
   }
-  el.app.classList.toggle("sb-collapsed", !!sidebarCollapsed);
+  el.app?.classList?.toggle?.("sb-collapsed", !!sidebarCollapsed);
 }
 
 function toggleSidebar() {
   const isMobile = window.matchMedia("(max-width: 900px)").matches;
   if (isMobile) {
-    if (el.sidebar.classList.contains("open")) closeSidebarIfMobile();
+    if (el.sidebar?.classList?.contains?.("open")) closeSidebarIfMobile();
     else openSidebar();
   } else {
     sidebarCollapsed = !sidebarCollapsed;
@@ -2395,10 +2719,13 @@ function downloadBlob(filename, blob) {
 
 function parseFilenameFromContentDisposition(headerValue) {
   const v = String(headerValue || "");
-  // attachment; filename="x.pdf"
-  const m = v.match(/filename\\*?=(?:UTF-8''|\"?)([^\";]+)\"?/i);
+  const m = v.match(/filename\*?=(?:UTF-8''|"?)([^";]+)"?/i);
   if (!m) return null;
-  try { return decodeURIComponent(m[1]); } catch { return m[1]; }
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return m[1];
+  }
 }
 
 async function exportConversationDocx(convId) {
@@ -2444,7 +2771,9 @@ async function exportConversationPdf(convId) {
 // =============================
 function setDownloadsUse(on) {
   useDownloadsInChat = !!on;
-  try { localStorage.setItem(DOWNLOADS_USE_KEY, useDownloadsInChat ? "1" : "0"); } catch { }
+  try {
+    localStorage.setItem(DOWNLOADS_USE_KEY, useDownloadsInChat ? "1" : "0");
+  } catch {}
   if (el.downloadsUseToggle) el.downloadsUseToggle.checked = useDownloadsInChat;
 }
 
@@ -2453,7 +2782,9 @@ function openDownloadsPanel() {
   el.downloadsPanel.hidden = false;
   if (el.downloadsUseToggle) el.downloadsUseToggle.checked = useDownloadsInChat;
   refreshDownloadsList();
-  try { el.downloadsSearchInput?.focus?.(); } catch { }
+  try {
+    el.downloadsSearchInput?.focus?.();
+  } catch {}
 }
 
 function closeDownloadsPanel() {
@@ -2592,7 +2923,7 @@ async function refreshDownloadsList({ silent = false } = {}) {
 }
 
 async function uploadDownloadFiles(files) {
-  const list = Array.isArray(files) ? files : (files ? [files] : []);
+  const list = Array.isArray(files) ? files : files ? [files] : [];
   if (!list.length) return;
   const fd = new FormData();
   for (const f of list) fd.append("files", f, f.name);
@@ -2630,49 +2961,54 @@ async function runDownloadsSearch() {
 // Events
 // =============================
 function bindEvents() {
-  // If this runs, we consider the UI "bound". Used by fallback handlers below.
+  // Idempotent: app.js can be loaded twice accidentally (multiple script tags, shim loaders, etc.).
+  // Duplicate event handlers can immediately abort streaming (one handler starts, the other sees isGenerating and stops).
+  if (window.__paytech.eventsBound) return;
+  window.__paytech.eventsBound = true;
+
   window.__paytech.bindOk = false;
 
-  // Scroll pinning
-  el.chat.addEventListener("scroll", () => {
-    pinnedToBottom = isNearBottom();
-    updateToBottomBtn();
-  }, { passive: true });
+  if (el.chat) {
+    el.chat.addEventListener(
+      "scroll",
+      () => {
+        pinnedToBottom = isNearBottom();
+        updateToBottomBtn();
+      },
+      { passive: true }
+    );
+  }
 
-  // To-bottom
   el.toBottomBtn?.addEventListener?.("click", () => {
     pinnedToBottom = true;
     scrollToBottom(true);
     updateToBottomBtn();
   });
 
-  // Sidebar open/close (mobile)
-  el.sidebarToggle.addEventListener("click", () => toggleSidebar());
+  el.sidebarToggle?.addEventListener?.("click", () => toggleSidebar());
   el.sidebarLogo?.addEventListener?.("click", () => toggleSidebar());
-  el.overlay.addEventListener("click", () => closeSidebarIfMobile());
+  el.overlay?.addEventListener?.("click", () => closeSidebarIfMobile());
 
-  // Search
-  el.searchInput.addEventListener("input", () => {
+  el.searchInput?.addEventListener?.("input", () => {
     searchQuery = el.searchInput.value || "";
     renderSidebarList();
   });
   el.searchBtn?.addEventListener?.("click", () => {
-    // In compact mode, expand then focus the input.
     if (sidebarCollapsed) toggleSidebar();
     setTimeout(() => {
-      try { el.searchInput?.focus?.(); } catch { }
+      try {
+        el.searchInput?.focus?.();
+      } catch {}
     }, 0);
   });
 
-  // New chat
-  el.newChat.addEventListener("click", () => {
+  el.newChat?.addEventListener?.("click", () => {
     pendingFiles = [];
     renderFileChips();
     goHome();
     closeSidebarIfMobile();
   });
 
-  // Downloads panel
   el.downloadBtn?.addEventListener?.("click", () => openDownloadsPanel());
   el.downloadsClose?.addEventListener?.("click", () => closeDownloadsPanel());
   el.downloadsPanel?.addEventListener?.("click", (e) => {
@@ -2714,17 +3050,18 @@ function bindEvents() {
     if (btn.dataset.action !== "use") return;
     const filename = card.dataset.filename || "arquivo";
     const snippet = card.dataset.snippet || "";
-    const insert = `Contexto do documento \"${filename}\":\n${snippet}\n\n`;
+    const insert = `Contexto do documento "${filename}":\n${snippet}\n\n`;
     const target = hasActiveConversation() ? el.input : el.emptyInput;
     if (target) target.value = insert + (target.value || "");
     if (hasActiveConversation()) autoResize();
     else autoResizeEmpty();
-    try { target?.focus?.(); } catch { }
+    try {
+      target?.focus?.();
+    } catch {}
     toast("Trecho inserido no chat.");
   });
 
-  // Conversation list click + kebab
-  el.conversationList.addEventListener("click", (e) => {
+  el.conversationList?.addEventListener?.("click", (e) => {
     const t = e.target;
     const kebab = t?.closest?.("button.kebab");
     if (kebab) {
@@ -2738,15 +3075,14 @@ function bindEvents() {
     if (item?.dataset?.id) selectConversation(item.dataset.id);
   });
 
-  el.conversationList.addEventListener("keydown", (e) => {
+  el.conversationList?.addEventListener?.("keydown", (e) => {
     if (e.key !== "Enter") return;
     const item = e.target?.closest?.(".conv-item");
     if (item?.dataset?.id) selectConversation(item.dataset.id);
   });
 
-  // Composer: attach
-  el.attachBtn.addEventListener("click", () => el.fileInput.click());
-  el.fileInput.addEventListener("change", () => {
+  el.attachBtn?.addEventListener?.("click", () => el.fileInput?.click?.());
+  el.fileInput?.addEventListener?.("change", () => {
     const files = Array.from(el.fileInput.files || []);
     if (!files.length) return;
     pendingFiles = pendingFiles.concat(files);
@@ -2755,23 +3091,21 @@ function bindEvents() {
     updateComposerControls();
   });
 
-  // Composer: input
-  el.input.addEventListener("input", autoResize);
-  el.input.addEventListener("input", updateComposerControls);
-  el.input.addEventListener("keydown", (e) => {
+  el.input?.addEventListener?.("input", autoResize);
+  el.input?.addEventListener?.("input", updateComposerControls);
+  el.input?.addEventListener?.("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
   });
 
-  el.sendBtn.addEventListener("click", () => {
+  el.sendBtn?.addEventListener?.("click", () => {
     ptLog("ui:sendBtn:click", { isGenerating, canSend: canSendNow() });
     if (isGenerating) stopGenerating();
     else sendMessage();
   });
 
-  // Empty state: central input
   el.emptyInput?.addEventListener?.("input", autoResizeEmpty);
   el.emptyInput?.addEventListener?.("input", updateComposerControls);
   el.emptyInput?.addEventListener?.("keydown", (e) => {
@@ -2782,23 +3116,23 @@ function bindEvents() {
   });
   el.emptySendBtn?.addEventListener?.("click", sendMessage);
 
-  // If focus isn't inside an editable element, typing should focus the composer.
-  // Fixes "I typed but it says empty" when focus is on the page/container.
-  document.addEventListener("keydown", (e) => {
-    try {
-      if (e.defaultPrevented) return;
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      // printable characters only (ignore navigation keys)
-      if (e.key !== "Enter" && String(e.key || "").length !== 1) return;
-      const ae = document.activeElement;
-      const tag = String(ae?.tagName || "").toLowerCase();
-      const isEditable = !!ae?.isContentEditable || tag === "textarea" || tag === "input";
-      if (isEditable) return;
-      focusComposer();
-    } catch { }
-  }, true);
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      try {
+        if (e.defaultPrevented) return;
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        if (e.key !== "Enter" && String(e.key || "").length !== 1) return;
+        const ae = document.activeElement;
+        const tag = String(ae?.tagName || "").toLowerCase();
+        const isEditable = !!ae?.isContentEditable || tag === "textarea" || tag === "input";
+        if (isEditable) return;
+        focusComposer();
+      } catch {}
+    },
+    true
+  );
 
-  // Clicking the composer background should focus the textarea.
   try {
     const footer = document.querySelector("footer.composer");
     footer?.addEventListener?.(
@@ -2810,9 +3144,8 @@ function bindEvents() {
       },
       { capture: true }
     );
-  } catch { }
+  } catch {}
 
-  // Empty suggestions
   el.emptySuggestions?.addEventListener?.("click", (e) => {
     const btn = e.target?.closest?.("button.pill");
     if (!btn) return;
@@ -2822,17 +3155,17 @@ function bindEvents() {
     el.emptyInput.value = text;
     autoResizeEmpty();
     updateComposerControls();
-    try { el.emptyInput.focus(); } catch { }
+    try {
+      el.emptyInput.focus();
+    } catch {}
   });
 
-  // Theme toggle (header)
   el.themeToggle?.addEventListener?.("click", () => {
     const current = document.documentElement.getAttribute("data-theme") || "light";
     applyTheme(current === "dark" ? "light" : "dark", { persist: true });
     toast("Tema atualizado.");
   });
 
-  // Response mode menu
   el.responseModeBtn?.addEventListener?.("click", (e) => {
     e?.preventDefault?.();
     e?.stopPropagation?.();
@@ -2860,7 +3193,6 @@ function bindEvents() {
     }
   });
 
-  // Menu click handling
   document.addEventListener("click", (e) => {
     const target = e.target;
     const inMenu = target?.closest?.(".menu");
@@ -2876,13 +3208,12 @@ function bindEvents() {
     }
   });
 
-  el.itemMenu.addEventListener("click", (e) => {
+  el.itemMenu?.addEventListener?.("click", (e) => {
     const btn = e.target?.closest?.("button.menu-item");
     if (!btn) return;
     const action = btn.dataset.action;
     const id = btn.dataset.id;
     if (action === "download") {
-      // anchor to the kebab button (stable DOM element)
       openExportMenu(lastMenuAnchorEl || btn, id);
       return;
     }
@@ -2902,11 +3233,10 @@ function bindEvents() {
   });
 
   window.addEventListener("resize", () => {
-    // close menus on layout changes
     closeMenus();
     if (!window.matchMedia("(max-width: 900px)").matches) {
-      el.overlay.hidden = true;
-      el.sidebar.classList.remove("open");
+      if (el.overlay) el.overlay.hidden = true;
+      el.sidebar?.classList?.remove?.("open");
     }
     applySidebarCollapsed();
     renderSidebarList();
@@ -2921,7 +3251,6 @@ function bindEvents() {
 function boot() {
   initTheme();
   loadState();
-  // Persist empty selection (so refresh doesn't reopen a thread)
   persistState();
   syncBrowserTitle();
   updateResponseModeButton();
@@ -2941,7 +3270,6 @@ function boot() {
     if (ok) {
       backendOnline = true;
       syncTopbarSubtitle();
-      // Keep RAG toggle effective across reloads (even if the user doesn't reopen the Downloads panel).
       if (useDownloadsInChat) refreshDownloadsList({ silent: true });
       return;
     }
@@ -2952,45 +3280,85 @@ function boot() {
     });
   });
 
-  try { el.emptyInput?.focus?.(); } catch { }
+  try {
+    el.emptyInput?.focus?.();
+  } catch {}
 }
 
 // Fallback send handlers: if boot/bindEvents crashed mid-way, keep chat usable.
-// We only act when `bindEvents()` didn't complete successfully.
 (() => {
   if (window.__paytechFallbackSendHandlersInstalled) return;
   window.__paytechFallbackSendHandlersInstalled = true;
 
-  document.addEventListener("click", (e) => {
-    if (window.__paytech?.bindOk) return;
-    const btn = e.target?.closest?.("#sendBtn");
-    if (!btn) return;
-    e.preventDefault();
-    e.stopPropagation();
-    try { sendMessage(); } catch (err) { _captureEarlyError("sendMessage(click)", err); }
-  }, true);
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (window.__paytech?.bindOk) return;
+      try {
+        window.__paytech?.bootOnce?.();
+      } catch {}
+      const btn = e.target?.closest?.("#sendBtn");
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        sendMessage();
+      } catch (err) {
+        _captureEarlyError("sendMessage(click)", err);
+      }
+    },
+    true
+  );
 
-  document.addEventListener("keydown", (e) => {
-    if (window.__paytech?.bindOk) return;
-    if (e.key !== "Enter" || e.shiftKey) return;
-    const ta = e.target?.closest?.("#input,#emptyInput");
-    if (!ta) return;
-    e.preventDefault();
-    e.stopPropagation();
-    try { sendMessage(); } catch (err) { _captureEarlyError("sendMessage(keydown)", err); }
-  }, true);
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (window.__paytech?.bindOk) return;
+
+      try {
+        window.__paytech?.bootOnce?.();
+      } catch {}
+
+      // Re-check after attempting to boot.
+      if (window.__paytech?.bindOk) return;
+
+      if (e.key !== "Enter" || e.shiftKey) return;
+      const ta = e.target?.closest?.("#input,#emptyInput");
+      if (!ta) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        sendMessage();
+      } catch (err) {
+        _captureEarlyError("sendMessage(keydown)", err);
+      }
+    },
+    true
+  );
 })();
 
-document.addEventListener("DOMContentLoaded", () => {
+function bootOnce() {
+  if (window.__paytech.booted) return;
+  window.__paytech.booted = true;
   try {
     boot();
-    // Flush early errors (if any) into the UI toast so it is visible without DevTools.
     if (_earlyErrors.length) {
       const last = _earlyErrors[_earlyErrors.length - 1];
       toast(`Erro no frontend: ${last.msg}`, { ms: 6500 });
     }
   } catch (err) {
     _captureEarlyError("boot", err);
-    try { toast(`Falha ao iniciar UI: ${String(err?.message || err)}`.trim(), { ms: 7000 }); } catch { }
+    try {
+      toast(`Falha ao iniciar UI: ${String(err?.message || err)}`.trim(), { ms: 7000 });
+    } catch {}
   }
-});
+}
+window.__paytech.bootOnce = bootOnce;
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", bootOnce, { once: true });
+} else {
+  // Handles dynamic script loading (e.g. script shim injected after DOMContentLoaded).
+  setTimeout(bootOnce, 0);
+} 

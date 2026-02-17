@@ -10,8 +10,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from db import get_db
-from models import MessageDB, SessionDB
+from ..db import get_db
+from ..models import MessageDB, SessionDB
 
 
 router = APIRouter(prefix="/export", tags=["export"])

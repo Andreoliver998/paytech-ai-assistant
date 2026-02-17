@@ -1,6 +1,6 @@
-# PayTech AI Assistant (PayTechAI_Senior)
+# PayTech AI Assistant
 
-Projeto Fullstack (backend FastAPI + frontend estático) com chat em streaming (SSE) e RAG em documentos (PDF/CSV/XLSX) via biblioteca “Downloads”.
+Projeto fullstack (backend FastAPI + frontend estático) com chat em streaming (SSE) e RAG em documentos (PDF/CSV/XLSX) via biblioteca “Downloads”.
 
 ## Stack
 - Backend: Python + FastAPI + Uvicorn
@@ -10,11 +10,10 @@ Projeto Fullstack (backend FastAPI + frontend estático) com chat em streaming (
 
 ## Estrutura
 ```
-PayTechAI_Assistant/
-  PayTechAI_Senior/
-    backend/        # FastAPI (app.py/main.py), serviços, RAG, DB
-    frontend/       # index.html, app.js, style.css
-    scripts/        # scripts auxiliares (se houver)
+paytech-ai-assistant/
+  backend/        # FastAPI (app.py/main.py), serviços, RAG, DB
+  frontend/       # index.html, script.js, style.css
+  scripts/        # scripts auxiliares (se houver)
 ```
 
 ## Requisitos
@@ -22,20 +21,19 @@ PayTechAI_Assistant/
 - (Opcional) VS Code + extensão “Live Server” para servir o frontend
 - Conta OpenAI com API key (local)
 
-## Setup rápido (Windows / PowerShell)
+## Executar (Windows / PowerShell)
 ```powershell
-cd .\PayTechAI_Assistant\PayTechAI_Senior\backend
+python -m venv backend\.venv
+.\backend\.venv\Scripts\Activate.ps1
 
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-pip install -r requirements.txt
+pip install -r backend\requirements.txt
 
 # Configure ambiente (não vai para o Git)
-Copy-Item .\.env.example .\.env
+# Preferência: .\.env (raiz do repo). (Compat) backend\.env também funciona.
+Copy-Item .\backend\.env.example .\.env
 # Edite .env e preencha OPENAI_API_KEY
 
-.\.venv\Scripts\python.exe -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
+.\backend\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Abra o Swagger:
@@ -43,10 +41,10 @@ Abra o Swagger:
 
 ## Frontend (Live Server)
 Sirva a pasta:
-- `PayTechAI_Assistant/PayTechAI_Senior/frontend`
+- `frontend`
 
 URL típica (Live Server):
-- `http://127.0.0.1:5500/PayTechAI_Assistant/PayTechAI_Senior/frontend/index.html`
+- `http://127.0.0.1:5500/frontend/index.html`
 
 O frontend tenta usar `http://localhost:8000` (fallback para `http://127.0.0.1:8000`).
 
@@ -59,11 +57,18 @@ location.reload();
 Ou por query param:
 - `index.html?api=http://127.0.0.1:8000`
 
-## Configuração de ambiente
-O backend carrega variáveis a partir de:
-- `PayTechAI_Assistant/PayTechAI_Senior/backend/.env`
+## Teste de streaming (debug)
+Para validar o streaming incremental no frontend sem depender do LLM:
+1) No `.env` (raiz): `DEBUG_STREAM=true`
+2) Abra: `http://127.0.0.1:5500/frontend/index.html?debugstream=1`
+3) Envie qualquer mensagem e confirme que aparece `A`, depois `B`, depois `C` antes de finalizar.
 
-Nunca comite `.env`. Ele já está protegido por `.gitignore` na raiz.
+Observação: em `ENV=dev` o backend pode subir mesmo sem `OPENAI_API_KEY`, permitindo usar `/health` e `/debug/stream`.
+Os endpoints `/chat` e `/chat/stream` retornam `503` até a chave ser configurada.
+
+## Ambiente
+- Nunca comite `.env` (já está protegido por `.gitignore`).
+- O backend procura `.env` nesta ordem: `./.env` → `backend/.env`.
 
 ## Endpoints principais
 - `GET /health` — healthcheck
@@ -77,9 +82,9 @@ Nunca comite `.env`. Ele já está protegido por `.gitignore` na raiz.
 
 ## Dados locais (não versionar)
 Por padrão o projeto cria/usa:
-- `PayTechAI_Assistant/PayTechAI_Senior/backend/data/` (SQLite, KB, uploads)
-- `PayTechAI_Assistant/PayTechAI_Senior/backend/logs/`
-- `PayTechAI_Assistant/PayTechAI_Senior/backend/storage/` (artefatos/export)
+- `backend/data/` (SQLite, KB, uploads)
+- `backend/logs/`
+- `backend/storage/` (artefatos/export)
 
 Essas pastas são ignoradas pelo Git.
 
@@ -89,4 +94,3 @@ Este repositório não inclui suíte de testes automatizados no momento.
 ## Segurança (GitHub)
 - Nunca publique `backend/.env`, bancos `.db`, uploads, logs ou `.venv`.
 - Antes de fazer `git add .`, verifique `git status` e confirme que nada sensível entrou no staging.
-
