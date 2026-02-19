@@ -4,7 +4,7 @@
   try {
     var s = document.createElement("script");
     // Keep cache-busting aligned with index.html.
-    s.src = "app.js?v=20260210_025";
+    s.src = "app.js?v=20260218_004";
     s.defer = true;
     document.head.appendChild(s);
   } catch (e) {

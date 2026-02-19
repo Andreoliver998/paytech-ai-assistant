@@ -8,11 +8,13 @@
 // =============================
 // Config
 // =============================
-const PAYTECH_BUILD = "2026-02-10_025";
+const PAYTECH_BUILD = "2026-02-19_009";
 // Prefer explicit IPv4 loopback: on some Windows setups `localhost` resolves to IPv6 (::1)
 // while uvicorn is bound only to 127.0.0.1, which can break streaming fetches.
 const BACKEND_DEFAULT = "http://127.0.0.1:8000";
 const BACKEND_BASE_KEY = "paytech.backendBase";
+const AUTH_TOKEN_KEY = "PAYTECH_TOKEN";
+const AUTH_BASE_KEY = "PAYTECH_AUTH_BASE";
 const DEBUG_STREAM_MODE = (() => {
   try {
     const url = new URL(window.location.href);
@@ -45,9 +47,9 @@ function _captureEarlyError(kind, err) {
       _lastErrToastMsg = msg;
       try {
         toast(`Erro no frontend: ${msg}`.slice(0, 220), { ms: 6500 });
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
 }
 window.addEventListener(
   "error",
@@ -74,7 +76,7 @@ function resolveBackendBase() {
     // but streaming is much more sensitive. Normalize the common default to IPv4.
     if (saved === "http://localhost:8000") {
       const normalized = "http://127.0.0.1:8000";
-      try { localStorage.setItem(BACKEND_BASE_KEY, normalized); } catch {}
+      try { localStorage.setItem(BACKEND_BASE_KEY, normalized); } catch { }
       return normalized;
     }
     return saved || BACKEND_DEFAULT;
@@ -92,6 +94,7 @@ const THEME_KEY = "theme";
 const DOWNLOADS_USE_KEY = "downloads.useInChat";
 const RESPONSE_MODE_KEY = "paytech.responseMode";
 const STREAMING_ENABLED_KEY = "paytech.streamingEnabled";
+const PRECISION_KEY = "paytech.precisionMode";
 const USER_ID_KEY = "paytech.userId";
 const DOWNLOADS_TOP_K = 6;
 
@@ -169,6 +172,7 @@ let sidebarCollapsed = false;
 let useDownloadsInChat = false;
 let responseMode = "tecnico"; // tecnico | resumido | didatico | estrategico
 let streamingEnabled = true; // true => POST /chat/stream (SSE), false => POST /chat (JSON)
+let precisionMode = true; // hybrid retrieval + deterministic ops
 let userId = "";
 let backendOnline = null; // boolean | null
 let topbarStatusOverride = "";
@@ -182,12 +186,12 @@ var __paytech = window.__paytech;
 // eslint-disable-next-line no-var
 var _paytech = window.__paytech;
 // Also expose as a window property (so DevTools can resolve it consistently).
-try { window._paytech = window.__paytech; } catch {}
+try { window._paytech = window.__paytech; } catch { }
 window.__paytech.build = PAYTECH_BUILD;
 try {
   // eslint-disable-next-line no-console
   console.info("[paytech] build", PAYTECH_BUILD);
-} catch {}
+} catch { }
 
 // Global event bus (must stay the same reference even if the script is loaded twice).
 const _ptEvents = Array.isArray(window.__paytech.events)
@@ -220,9 +224,9 @@ function ptLog(name, data) {
             events: _ptEvents.slice(-200),
           })
         );
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
 }
 window.__paytech.log = ptLog;
 ptLog("init", { build: PAYTECH_BUILD, loadCount: window.__paytech.loadCount });
@@ -266,10 +270,10 @@ window.__paytech.eventsDumpPersisted = () => {
 window.__paytech.eventsClear = () => {
   try {
     _ptEvents.splice(0, _ptEvents.length);
-  } catch {}
+  } catch { }
   try {
     localStorage.removeItem(_PT_DEBUG_KEY);
-  } catch {}
+  } catch { }
   ptLog("init", { build: PAYTECH_BUILD, loadCount: window.__paytech.loadCount, cleared: true });
 };
 window.__paytech.peekComposer = () => {
@@ -292,6 +296,17 @@ window.__paytech.peekComposer = () => {
   };
 };
 
+// Debug helpers: prove whether downloads are blocked by the browser.
+try {
+  window.__paytech.downloadBlob = downloadBlob;
+  window.__paytech.exportConversationTxt = exportConversationTxt;
+  window.__paytech.testDownload = () => {
+    const blob = new Blob([`paytech download test @ ${new Date().toISOString()}\n`], { type: "text/plain;charset=utf-8" });
+    downloadBlob("paytech-download-test.txt", blob);
+    return true;
+  };
+} catch { }
+
 // Always-on capture diagnostics: prove whether UI events are firing even if handlers misbehave.
 (() => {
   if (window.__paytechCaptureDiagnosticsInstalled) return;
@@ -304,9 +319,9 @@ window.__paytech.peekComposer = () => {
       window.setTimeout(() => {
         try {
           elm.removeAttribute("data-pt-flash");
-        } catch {}
+        } catch { }
       }, 180);
-    } catch {}
+    } catch { }
   }
 
   function logComposerClick(kind, target) {
@@ -351,7 +366,7 @@ window.__paytech.peekComposer = () => {
       // tenta inicializar
       try {
         window.__paytech?.bootOnce?.();
-      } catch {}
+      } catch { }
 
       // ✅ RE-CHECA: se boot resolveu o bind, NÃO dispara fallback
       if (window.__paytech?.bindOk) return;
@@ -408,7 +423,7 @@ window.__paytech.selftest = async () => {
   };
   try {
     try {
-      const r = await fetch(`${base}/health`, { method: "GET" });
+      const r = await authFetch(`${base}/health`, { method: "GET" });
       out.health.status = r.status;
       out.health.ok = r.ok;
     } catch (e) {
@@ -421,9 +436,9 @@ window.__paytech.selftest = async () => {
       const chatTimer = window.setTimeout(() => {
         try {
           acChat.abort();
-        } catch {}
+        } catch { }
       }, 6500);
-      const r = await fetch(`${base}/chat`, {
+      const r = await authFetch(`${base}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: [{ role: "user", content: "ping" }] }),
@@ -435,7 +450,7 @@ window.__paytech.selftest = async () => {
       out.chat.hasReply = !!String(data?.reply || "").trim();
       try {
         clearTimeout(chatTimer);
-      } catch {}
+      } catch { }
     } catch (e) {
       if (String(e?.name || "") === "AbortError") {
         out.chat.ok = false;
@@ -451,11 +466,11 @@ window.__paytech.selftest = async () => {
     const timer = window.setTimeout(() => {
       try {
         ac.abort();
-      } catch {}
+      } catch { }
     }, 10000);
 
     try {
-      const r = await fetch(`${base}/chat/stream`, {
+      const r = await authFetch(`${base}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({ messages: [{ role: "user", content: "ping" }] }),
@@ -488,7 +503,7 @@ window.__paytech.selftest = async () => {
     } finally {
       try {
         clearTimeout(timer);
-      } catch {}
+      } catch { }
     }
 
     // Summary error: only fail the whole selftest if health or stream fails.
@@ -500,6 +515,25 @@ window.__paytech.selftest = async () => {
     return out;
   }
 };
+
+// Console helper: run diagnostics without needing top-level `await`.
+window.__paytech.selftestRun = () =>
+  window.__paytech
+    .selftest()
+    .then((res) => {
+      try {
+        // eslint-disable-next-line no-console
+        console.log("[paytech] selftest", res);
+      } catch { }
+      return res;
+    })
+    .catch((err) => {
+      try {
+        // eslint-disable-next-line no-console
+        console.error("[paytech] selftest error", err);
+      } catch { }
+      throw err;
+    });
 
 // Health ping throttling (avoid spamming /health on repeated failures)
 let _healthLastAt = 0;
@@ -519,20 +553,20 @@ function flushStreamNow() {
   if (streamFlushRaf) {
     try {
       cancelAnimationFrame(streamFlushRaf);
-    } catch {}
+    } catch { }
     streamFlushRaf = 0;
   }
   if (!streamBuffer) return;
 
   try {
     streamingMsg.textNode?.appendData?.(streamBuffer);
-  } catch {}
+  } catch { }
 
   try {
     const conv = conversations.find((c) => c.id === streamingMsg.convId);
     const msg = conv?.messages?.find((m) => m.id === streamingMsg.msgId);
     if (msg) msg.content = String(msg.content || "") + streamBuffer;
-  } catch {}
+  } catch { }
 
   streamBuffer = "";
   scrollToBottomIfNeeded();
@@ -551,7 +585,7 @@ function getMd() {
         typographer: true,
       });
     }
-  } catch {}
+  } catch { }
   return null;
 }
 const md = getMd();
@@ -653,6 +687,102 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function normalizeAuthToken(rawToken) {
+  let t = String(rawToken || "").trim();
+  if (!t) return "";
+
+  // Common footguns: token stored with quotes or with "Bearer " prefix.
+  if ((t.startsWith("\"") && t.endsWith("\"")) || (t.startsWith("'") && t.endsWith("'"))) {
+    t = t.slice(1, -1).trim();
+  }
+  t = t.replace(/^\s*bearer\s+/i, "").trim();
+  t = t.replace(/\s+/g, "");
+
+  const low = t.toLowerCase();
+  if (!t || low === "null" || low === "undefined") return "";
+  return t;
+}
+
+function getAuthToken() {
+  try {
+    const raw = localStorage.getItem(AUTH_TOKEN_KEY);
+    const token = normalizeAuthToken(raw);
+    if (!token) return "";
+
+    // Heal storage if we detected a malformed/legacy format.
+    const rawTrimmed = String(raw || "").trim();
+    if (rawTrimmed && rawTrimmed !== token) {
+      try {
+        localStorage.setItem(AUTH_TOKEN_KEY, token);
+      } catch { }
+    }
+
+    return token;
+  } catch {
+    return "";
+  }
+}
+
+function clearAuthStorage() {
+  try {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_BASE_KEY);
+    localStorage.removeItem("PAYTECH_USER_ID");
+    localStorage.removeItem("PAYTECH_TENANT_ID");
+  } catch { }
+}
+
+let _authRedirecting = false;
+function handleUnauthorized() {
+  if (_authRedirecting) return;
+  _authRedirecting = true;
+  clearAuthStorage();
+  try {
+    window.location.replace("login.html");
+  } catch {
+    try {
+      window.location.href = "login.html";
+    } catch { }
+  }
+}
+
+function enforceAuthBaseConsistency() {
+  try {
+    const token = String(localStorage.getItem(AUTH_TOKEN_KEY) || "").trim();
+    if (!token) return;
+    const authBase = String(localStorage.getItem(AUTH_BASE_KEY) || "").trim();
+    const currentBase = String(BACKEND_BASE || "").trim();
+    if (authBase && currentBase && authBase !== currentBase) {
+      clearAuthStorage();
+      window.location.replace("login.html");
+    }
+  } catch { }
+}
+
+async function authFetch(url, options = {}) {
+  const token = getAuthToken();
+  const headers = options.headers ? { ...options.headers } : {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  try {
+    ptLog("fetch:req", {
+      url: String(url || ""),
+      method: String(options?.method || "GET"),
+      hasAuth: !!token,
+    });
+  } catch {}
+  const res = await fetch(url, { ...options, headers });
+  try {
+    ptLog("fetch:res", {
+      url: String(url || ""),
+      status: res.status,
+      ok: !!res.ok,
+      contentType: String(res.headers.get("content-type") || ""),
+    });
+  } catch {}
+  if (res.status === 401) handleUnauthorized();
+  return res;
+}
+
 async function fetchWithRetry(url, options, retry = { retries: 1, delayMs: 360 }) {
   const retries = Math.max(0, Number(retry?.retries ?? 1));
   const delayMs = Math.max(0, Number(retry?.delayMs ?? 360));
@@ -660,7 +790,7 @@ async function fetchWithRetry(url, options, retry = { retries: 1, delayMs: 360 }
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await fetch(url, options);
+      return await authFetch(url, options);
     } catch (e) {
       lastErr = e;
       const aborted = String(options?.signal?.aborted || "") === "true" || String(e?.name || "") === "AbortError";
@@ -684,20 +814,20 @@ async function pingBackendHealth(timeoutMs = 900) {
   const timer = window.setTimeout(() => {
     try {
       ac.abort();
-    } catch {}
+    } catch { }
   }, timeoutMs);
 
   _healthLastBase = base;
   _healthInFlight = (async () => {
     try {
-      const res = await fetch(`${BACKEND_BASE}/health`, { method: "GET", signal: ac.signal });
+      const res = await authFetch(`${BACKEND_BASE}/health`, { method: "GET", signal: ac.signal });
       return !!res.ok;
     } catch {
       return false;
     } finally {
       try {
         clearTimeout(timer);
-      } catch {}
+      } catch { }
     }
   })();
 
@@ -713,9 +843,11 @@ function getAlternateBackendBases() {
   const raw = String(BACKEND_BASE || "").trim();
   const cur = raw === "http://localhost:8000" ? "http://127.0.0.1:8000" : raw;
   const ip = "http://127.0.0.1:8000";
+  const alt = "http://127.0.0.1:8001";
 
   if (cur) bases.push(cur);
   if (!bases.includes(ip)) bases.push(ip);
+  if (!bases.includes(alt)) bases.push(alt);
 
   return bases;
 }
@@ -730,7 +862,7 @@ async function ensureBackendBaseOnline() {
       backendOnline = true;
       try {
         localStorage.setItem(BACKEND_BASE_KEY, base);
-      } catch {}
+      } catch { }
       if (prev !== base) toast(`Backend conectado: ${base}`, { ms: 1800 });
       return true;
     }
@@ -795,7 +927,7 @@ function toast(msg, { ms = 2200 } = {}) {
 // Expose for diagnostics (DevTools) and early crash hooks.
 try {
   window.toast = toast;
-} catch {}
+} catch { }
 
 async function copyToClipboard(text) {
   const t = String(text || "");
@@ -861,7 +993,7 @@ function applyTheme(theme, { persist } = { persist: false }) {
   if (persist) {
     try {
       localStorage.setItem(THEME_KEY, t);
-    } catch {}
+    } catch { }
   }
   updateThemeToggleIcon();
 }
@@ -873,7 +1005,7 @@ function initTheme() {
     mq.addEventListener?.("change", () => {
       if (!readStoredTheme()) applyTheme(getSystemTheme(), { persist: false });
     });
-  } catch {}
+  } catch { }
 }
 
 // =============================
@@ -900,7 +1032,7 @@ function loadState() {
     if (saved && conversations.some((c) => c.id === saved)) {
       selectedConversationId = saved;
     }
-  } catch {}
+  } catch { }
   if (!selectedConversationId && conversations.length === 1) {
     selectedConversationId = conversations[0].id;
   }
@@ -937,10 +1069,21 @@ function loadState() {
   }
 
   try {
-    userId = String(localStorage.getItem(USER_ID_KEY) || "").trim();
+    const v = String(localStorage.getItem(PRECISION_KEY) || "").trim().toLowerCase();
+    if (!v) precisionMode = true;
+    else precisionMode = v === "1" || v === "true" || v === "on" || v === "yes";
+  } catch {
+    precisionMode = true;
+  }
+
+  try {
+    const authUserId = String(localStorage.getItem("PAYTECH_USER_ID") || "").trim();
+    userId = authUserId || String(localStorage.getItem(USER_ID_KEY) || "").trim();
     if (!userId) {
       userId = uuid();
       localStorage.setItem(USER_ID_KEY, userId);
+    } else if (authUserId) {
+      localStorage.setItem(USER_ID_KEY, authUserId);
     }
   } catch {
     userId = userId || uuid();
@@ -950,22 +1093,25 @@ function loadState() {
 function persistState() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
-  } catch {}
+  } catch { }
   try {
     localStorage.setItem(STORAGE_SELECTED, selectedConversationId || "");
-  } catch {}
+  } catch { }
   try {
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0");
-  } catch {}
+  } catch { }
   try {
     localStorage.setItem(RESPONSE_MODE_KEY, normalizeMode(responseMode));
-  } catch {}
+  } catch { }
   try {
     localStorage.setItem(STREAMING_ENABLED_KEY, streamingEnabled ? "1" : "0");
-  } catch {}
+  } catch { }
+  try {
+    localStorage.setItem(PRECISION_KEY, precisionMode ? "1" : "0");
+  } catch { }
   try {
     if (userId) localStorage.setItem(USER_ID_KEY, userId);
-  } catch {}
+  } catch { }
 }
 
 function normalizeConversation(c) {
@@ -988,10 +1134,10 @@ function normalizeMessage(m) {
   const ts = String(m.ts || nowISO());
   const attachments = Array.isArray(m.attachments)
     ? m.attachments.map((a) => ({
-        name: String(a?.name || ""),
-        type: String(a?.type || ""),
-        size: Number(a?.size || 0),
-      }))
+      name: String(a?.name || ""),
+      type: String(a?.type || ""),
+      size: Number(a?.size || 0),
+    }))
     : [];
   const interrupted = !!m.interrupted;
   const sources = [];
@@ -1031,19 +1177,28 @@ function closeMenus({ restoreFocus = false } = {}) {
   }
   try {
     if (anchor?.classList?.contains?.("kebab")) anchor.setAttribute("aria-expanded", "false");
-  } catch {}
+  } catch { }
   lastMenuAnchorEl = null;
   if (restoreFocus && anchor && document.contains(anchor)) {
     try {
       anchor.focus();
-    } catch {}
+    } catch { }
   }
 }
 
 function menuPosition(menuEl, anchorEl) {
-  const r = anchorEl.getBoundingClientRect();
   const pad = 10;
   const w = 260;
+
+  if (!anchorEl || typeof anchorEl.getBoundingClientRect !== "function") {
+    const x0 = clamp(window.innerWidth - w - pad, pad, window.innerWidth - w - pad);
+    const y0 = pad;
+    menuEl.style.left = `${x0}px`;
+    menuEl.style.top = `${y0}px`;
+    return;
+  }
+
+  const r = anchorEl.getBoundingClientRect();
   const x = clamp(r.right - w, pad, window.innerWidth - w - pad);
   const y = clamp(r.bottom + 8, pad, window.innerHeight - pad - 180);
   menuEl.style.left = `${x}px`;
@@ -1073,6 +1228,7 @@ function renderModeMenu() {
   if (!el.modeMenu) return;
   const current = normalizeMode(responseMode);
   const streamingLabel = streamingEnabled ? "Ligado" : "Desligado";
+  const precisionLabel = precisionMode ? "Ligado" : "Desligado";
   el.modeMenu.innerHTML = `
     <div class="menu-title">Modo de resposta</div>
     <button class="menu-item" data-action="set-mode" data-mode="tecnico" role="menuitem">
@@ -1095,6 +1251,10 @@ function renderModeMenu() {
     <button class="menu-item" data-action="toggle-streaming" role="menuitem">
       <span>Streaming</span>
       <span class="right">${streamingLabel}</span>
+    </button>
+    <button class="menu-item" data-action="toggle-precision" role="menuitem">
+      <span>Modo Precisão</span>
+      <span class="right">${precisionLabel}</span>
     </button>
   `;
 }
@@ -1127,7 +1287,7 @@ function openItemMenu(anchorEl, convId) {
   lastMenuAnchorEl = anchorEl;
   try {
     anchorEl?.setAttribute?.("aria-expanded", "true");
-  } catch {}
+  } catch { }
   el.itemMenu.querySelector("button.menu-item")?.focus?.();
 }
 
@@ -1135,6 +1295,10 @@ function renderExportMenu(convId) {
   if (!el.exportMenu) return;
   el.exportMenu.innerHTML = `
     <div class="menu-title">Baixar conversa</div>
+    <button class="menu-item" data-action="export-txt" data-id="${convId}" role="menuitem">
+      <span>Texto</span>
+      <span class="right">.txt</span>
+    </button>
     <button class="menu-item" data-action="export-docx" data-id="${convId}" role="menuitem">
       <span>Word (ABNT)</span>
       <span class="right">.docx</span>
@@ -1178,7 +1342,7 @@ function renderLayout() {
   if (!active) {
     try {
       el.thread?.replaceChildren?.();
-    } catch {}
+    } catch { }
   }
 }
 
@@ -1281,7 +1445,7 @@ function ensureStreamingBind() {
         t.textContent = streamingMsg.thinkingText || "Analisando…";
         streamingMsg.thinkingEl = t;
         contentEl.insertBefore(t, cursor);
-      } catch {}
+      } catch { }
     }
 
     ptLog("stream:rebind", { convId: streamingMsg.convId, msgId: streamingMsg.msgId, hasText: !!existingText.trim() });
@@ -1322,12 +1486,15 @@ function buildMessageEl(msg) {
       status.textContent = "(interrompido)";
       article.appendChild(status);
     }
-    // UX rule: never render sources in chat messages.
+    if (msg.sourcesRequested && Array.isArray(msg.sources) && msg.sources.length) {
+      renderSources(content, msg.sources);
+    }
     if (Array.isArray(msg.artifacts) && msg.artifacts.length) {
       renderArtifacts(content, msg.artifacts);
     }
   } else {
-    content.textContent = msg.content || "";
+    content.textContent = normalizeLatexBlocksOutsideCode(msg.content || "");
+    enhanceMath(content);
     if (msg.attachments?.length) {
       const files = document.createElement("div");
       files.className = "files";
@@ -1420,10 +1587,11 @@ function renderArtifacts(contentEl, items) {
 }
 
 function renderAssistantContent(container, markdown) {
-  const raw = String(markdown || "");
+  const raw = normalizeLatexBlocksOutsideCode(markdown || "");
 
   if (!md || !window.DOMPurify) {
     container.textContent = raw;
+    enhanceMath(container);
     return;
   }
 
@@ -1431,6 +1599,7 @@ function renderAssistantContent(container, markdown) {
   const safe = window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
   container.innerHTML = safe;
   enhanceCodeBlocks(container);
+  enhanceMath(container);
 }
 
 function enhanceCodeBlocks(container) {
@@ -1455,6 +1624,164 @@ function enhanceCodeBlocks(container) {
     wrap.appendChild(pre);
     wrap.appendChild(btn);
   });
+}
+
+function _hasExplicitMathDelimiters(text) {
+  const t = String(text || "");
+  if (!t) return false;
+  if (t.includes("$$")) return true;
+  if (t.includes("$")) return true;
+  if (t.includes("\\(") || t.includes("\\)")) return true;
+  if (t.includes("\\[") || t.includes("\\]")) return true;
+  return false;
+}
+
+function normalizeLatexBlocksOutsideCode(rawText) {
+  const text = String(rawText || "");
+  if (!text) return text;
+
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let inFence = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = (line || "").trim();
+
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+
+    const isBlockStart = trimmed === "$$" || trimmed === "\\[";
+    if (!isBlockStart) {
+      out.push(line);
+      continue;
+    }
+
+    const open = trimmed;
+    const close = open === "$$" ? "$$" : "\\]";
+
+    const contentLines = [];
+    let foundClose = false;
+    for (let j = i + 1; j < lines.length; j++) {
+      const t2 = (lines[j] || "").trim();
+      if (t2 === close) {
+        foundClose = true;
+        i = j; // advance outer loop to the close delimiter
+        break;
+      }
+      contentLines.push(lines[j]);
+    }
+
+    if (!foundClose) {
+      out.push(line);
+      continue;
+    }
+
+    const content = contentLines
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // Single-line delimiters avoid Markdown inserting <br> nodes that break auto-render matching.
+    out.push(`${open}${content ? " " + content + " " : " "}${close}`.trim());
+  }
+
+  return out.join("\n");
+}
+
+function _maybeWrapImplicitLatexInText(text) {
+  const t = String(text || "");
+  if (!t) return t;
+  if (_hasExplicitMathDelimiters(t)) return t;
+  if (!t.includes("\\")) return t;
+
+  // Heuristic: wrap common LaTeX math fragments when backend returns them without delimiters.
+  // Keep it conservative to avoid false-positives in normal prose.
+  let out = t;
+
+  // \frac{a}{b}, \dfrac{a}{b}, \tfrac{a}{b}
+  out = out.replace(/\\(?:dfrac|tfrac|frac)\s*\{[^{}]+\}\s*\{[^{}]+\}/g, (m) => `$${m}$`);
+  // \sqrt{...}
+  out = out.replace(/\\sqrt\s*\{[^{}]+\}/g, (m) => `$${m}$`);
+
+  return out;
+}
+
+function enhanceMath(container) {
+  const root = container;
+  if (!root) return;
+
+  // Step 1: add implicit delimiters for common backend outputs (optional).
+  try {
+    const ignoredTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "PRE", "CODE"]);
+
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          try {
+            const v = String(node?.nodeValue || "");
+            if (!v || !v.trim()) return NodeFilter.FILTER_REJECT;
+            const parent = node.parentElement;
+            if (!parent) return NodeFilter.FILTER_REJECT;
+            if (parent.closest?.(".katex, .katex-display")) return NodeFilter.FILTER_REJECT;
+
+            let el = parent;
+            while (el && el !== root) {
+              if (ignoredTags.has(el.tagName)) return NodeFilter.FILTER_REJECT;
+              el = el.parentElement;
+            }
+
+            if (ignoredTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
+
+            // Only process nodes likely to contain math (delimiters or LaTeX commands).
+            if (!_hasExplicitMathDelimiters(v) && !v.includes("\\")) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          } catch {
+            return NodeFilter.FILTER_REJECT;
+          }
+        },
+      },
+      false
+    );
+
+    const nodes = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+
+    for (const n of nodes) {
+      const cur = String(n?.nodeValue || "");
+      const next = _maybeWrapImplicitLatexInText(cur);
+      if (next !== cur) n.nodeValue = next;
+    }
+  } catch { }
+
+  // Step 2: KaTeX auto-render.
+  try {
+    // `renderMathInElement` is provided by KaTeX auto-render (loaded via CDN).
+    // @ts-ignore
+    if (typeof window.renderMathInElement !== "function") return;
+    // @ts-ignore
+    window.renderMathInElement(root, {
+      delimiters: [
+        { left: "$$", right: "$$", display: true },
+        { left: "$", right: "$", display: false },
+        { left: "\\(", right: "\\)", display: false },
+        { left: "\\[", right: "\\]", display: true },
+      ],
+      throwOnError: false,
+      strict: "ignore",
+      ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+    });
+  } catch { }
 }
 
 function appendMessageToThread(msg) {
@@ -1557,7 +1884,7 @@ function goHome() {
   updateComposerControls();
   try {
     el.emptyInput?.focus?.();
-  } catch {}
+  } catch { }
 }
 
 function renameConversation(id) {
@@ -1632,7 +1959,7 @@ async function maybeAutoTitleConversation(convId) {
   persistState();
 
   try {
-    const res = await fetch(`${BACKEND_BASE}/titles/generate`, {
+    const res = await authFetch(`${BACKEND_BASE}/titles/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1657,7 +1984,7 @@ async function maybeAutoTitleConversation(convId) {
       renderHeader();
       renderSidebarList();
     }
-  } catch {}
+  } catch { }
 }
 
 function readComposerText() {
@@ -1689,7 +2016,7 @@ function focusComposer() {
   const target = main.trim() ? el.input : (empty.trim() ? el.emptyInput : (hasActiveConversation() ? el.input : el.emptyInput));
   try {
     target?.focus?.();
-  } catch {}
+  } catch { }
 }
 
 function autoResizeEmpty() {
@@ -1716,7 +2043,7 @@ function setGenerating(on) {
   syncFavicon();
   try {
     el.chat?.setAttribute?.("aria-busy", isGenerating ? "true" : "false");
-  } catch {}
+  } catch { }
   renderHeader();
 }
 
@@ -1763,7 +2090,7 @@ function startStreamingIntoMessage({ convId, msgId, contentEl, sourcesRequested 
     try {
       const article = el.thread?.querySelector?.(`article.msg[data-msg-id="${msgId}"]`);
       contentEl = article?.querySelector?.(".content") || null;
-    } catch {}
+    } catch { }
   }
   if (!contentEl) return false;
 
@@ -1805,7 +2132,7 @@ function setThinkingStatus(nextText) {
   streamingMsg.thinkingText = t;
   try {
     if (streamingMsg.thinkingEl) streamingMsg.thinkingEl.textContent = t;
-  } catch {}
+  } catch { }
 }
 
 function ensureThinkingVisible() {
@@ -1819,7 +2146,7 @@ function ensureThinkingVisible() {
     t.textContent = streamingMsg.thinkingText || "Analisando…";
     streamingMsg.thinkingEl = t;
     streamingMsg.contentEl?.insertBefore?.(t, streamingMsg.cursorEl);
-  } catch {}
+  } catch { }
 }
 
 function setStreamingSources(items) {
@@ -1840,7 +2167,7 @@ function streamAppend(text) {
     streamingMsg.hasFirstChunk = true;
     try {
       streamingMsg.thinkingEl?.remove?.();
-    } catch {}
+    } catch { }
     streamingMsg.thinkingEl = null;
     if (streamingMsg.thinkingTimer) {
       clearTimeout(streamingMsg.thinkingTimer);
@@ -1879,16 +2206,20 @@ function finalizeStreaming({ ok, errorMessage, sources, artifacts } = { ok: true
   const contentEl = streamingMsg.contentEl;
   const cursorEl = streamingMsg.cursorEl;
 
-  const finalSources = [];
+  const finalSources = Array.isArray(sources)
+    ? sources
+    : Array.isArray(streamingMsg.sources)
+      ? streamingMsg.sources
+      : [];
   const finalArtifacts = Array.isArray(artifacts) ? artifacts : Array.isArray(streamingMsg.artifacts) ? streamingMsg.artifacts : [];
 
   try {
     streamingMsg.thinkingEl?.remove?.();
-  } catch {}
+  } catch { }
   if (streamingMsg.thinkingTimer) clearTimeout(streamingMsg.thinkingTimer);
   try {
     cursorEl?.remove?.();
-  } catch {}
+  } catch { }
 
   const conv = conversations.find((c) => c.id === convId);
   const msg = conv?.messages?.find((m) => m.id === msgId);
@@ -1904,8 +2235,10 @@ function finalizeStreaming({ ok, errorMessage, sources, artifacts } = { ok: true
     if (contentEl) renderAssistantContent(contentEl, msg.content);
   }
 
-  msg.sources = [];
-  msg.sourcesRequested = false;
+  msg.sources = msg.sourcesRequested ? finalSources : [];
+  if (msg.sourcesRequested && msg.sources.length && contentEl) {
+    renderSources(contentEl, msg.sources);
+  }
   if (finalArtifacts.length) {
     msg.artifacts = finalArtifacts;
     if (contentEl) renderArtifacts(contentEl, finalArtifacts);
@@ -1926,7 +2259,7 @@ function finalizeStreamingInterrupted() {
   const { convId, msgId, contentEl, cursorEl } = streamingMsg;
   try {
     streamingMsg.thinkingEl?.remove?.();
-  } catch {}
+  } catch { }
   if (streamingMsg.thinkingTimer) clearTimeout(streamingMsg.thinkingTimer);
   if (cursorEl) cursorEl.remove();
 
@@ -1989,7 +2322,7 @@ function userAskedForSourcesFromText(text) {
 async function sendMessage() {
   try {
     console.count("sendMessage");
-  } catch {}
+  } catch { }
 
   ptLog("sendMessage:enter", { isGenerating, hasActiveConversation: hasActiveConversation(), pendingFiles: pendingFiles.length });
   if (isGenerating) return;
@@ -2032,7 +2365,7 @@ async function sendMessage() {
     setTimeout(() => {
       try {
         el.input?.focus?.();
-      } catch {}
+      } catch { }
     }, 0);
   }
 
@@ -2101,7 +2434,7 @@ async function sendMessage() {
   clearComposerText();
   pendingFiles = [];
   renderFileChips();
-  try { if (el.fileInput) el.fileInput.value = ""; } catch {}
+  try { if (el.fileInput) el.fileInput.value = ""; } catch { }
   updateComposerControls();
 
   setGenerating(true);
@@ -2142,7 +2475,20 @@ async function sendMessage() {
       setTopbarStatus("Reconectando…");
       setThinkingStatus(String(reason || "Reconectando…"));
       ensureThinkingVisible();
-      try { currentAbortController?.abort?.(); } catch {}
+      try { currentAbortController?.abort?.(); } catch { }
+
+      // Hotfix local: if 8000 is an old/stale backend instance, prefer 8001 for fallback.
+      try {
+        const baseNow = String(BACKEND_BASE || "").trim();
+        const alt = "http://127.0.0.1:8001";
+        if (/:(8000)$/.test(baseNow) && baseNow !== alt) {
+          const h = await fetch(`${alt}/health`, { method: "GET" });
+          if (h && h.ok) {
+            BACKEND_BASE = alt;
+            try { localStorage.setItem(BACKEND_BASE_KEY, alt); } catch { }
+          }
+        }
+      } catch { }
 
       // Before falling back to non-stream /chat, try to ensure we are pointing at a reachable backend.
       // This mitigates common local issues (localhost IPv6 ::1 vs uvicorn bound to 127.0.0.1, reloads, etc.).
@@ -2160,6 +2506,8 @@ async function sendMessage() {
         response_mode: responseMode,
         use_downloads: effectiveUseDownloads() || uploadedDocsForThisMessage,
         downloads_top_k: DOWNLOADS_TOP_K,
+        show_sources: userAskedForSources,
+        precision: !!precisionMode,
       };
 
       const doPost = () =>
@@ -2229,7 +2577,7 @@ async function sendMessage() {
       const slowHintTimer = window.setTimeout(() => {
         try {
           toast("Streaming está desligado; /chat pode demorar. Ative em Modo de resposta → Streaming.", { ms: 5200 });
-        } catch {}
+        } catch { }
       }, 5000);
 
       if (filesToSend.length > 0) {
@@ -2248,6 +2596,8 @@ async function sendMessage() {
         response_mode: responseMode,
         use_downloads: effectiveUseDownloads(),
         downloads_top_k: DOWNLOADS_TOP_K,
+        show_sources: userAskedForSources,
+        precision: !!precisionMode,
       };
 
       const r = await fetchWithRetry(`${BACKEND_BASE}/chat`, {
@@ -2258,11 +2608,15 @@ async function sendMessage() {
       });
       try {
         clearTimeout(slowHintTimer);
-      } catch {}
+      } catch { }
 
       ptLog("fetch:/chat:response", { status: r.status, ok: r.ok, ct: r.headers?.get?.("content-type") || "" });
 
       if (!r.ok) {
+        if (r.status === 401) {
+          try { toast("Sessão expirada. Redirecionando para login…", { ms: 3500 }); } catch { }
+          return;
+        }
         const t = await r.text().catch(() => "");
         finalizeStreaming({ ok: false, errorMessage: `Servidor retornou ${r.status}. ${t ? t.slice(0, 240) : ""}`.trim() });
         return;
@@ -2322,6 +2676,8 @@ async function sendMessage() {
         response_mode: responseMode,
         use_downloads: effectiveUseDownloads() || uploadedDocsForThisMessage,
         downloads_top_k: DOWNLOADS_TOP_K,
+        show_sources: userAskedForSources,
+        precision: !!precisionMode,
       }),
       signal: currentAbortController.signal,
     });
@@ -2329,6 +2685,10 @@ async function sendMessage() {
     ptLog("fetch:/chat/stream:response", { status: res.status, ok: res.ok, ct: res.headers?.get?.("content-type") || "" });
 
     if (!res.ok) {
+      if (res.status === 401) {
+        try { toast("Sessão expirada. Redirecionando para login…", { ms: 3500 }); } catch { }
+        return;
+      }
       const t = await res.text().catch(() => "");
       finalizeStreaming({ ok: false, errorMessage: `Servidor retornou ${res.status}. ${t ? t.slice(0, 240) : ""}`.trim() });
       return;
@@ -2400,6 +2760,10 @@ async function sendMessage() {
         },
         onDone: () => {
           ptLog("sse:done", { sawAnyDelta });
+          if (!streamingMsg?.hasFirstChunk) {
+            emptyStreamDone = true;
+            return;
+          }
           clearTopbarStatus();
           finalizeStreaming({ ok: true });
         },
@@ -2468,7 +2832,7 @@ async function sendMessage() {
     if (watchdogTimer) {
       try {
         clearTimeout(watchdogTimer);
-      } catch {}
+      } catch { }
       watchdogTimer = 0;
     }
     setGenerating(false);
@@ -2481,7 +2845,7 @@ async function sendMessage() {
 function stopGenerating() {
   try {
     currentAbortController?.abort();
-  } catch {}
+  } catch { }
   finalizeStreamingInterrupted();
   toast("Geração interrompida.", { ms: 1800 });
   setGenerating(false);
@@ -2570,7 +2934,7 @@ async function readSseStream(reader, handlers) {
         const t = String(payload.type || payload.event || "").trim();
         if (t) eventName = t;
       }
-    } catch {}
+    } catch { }
     const deltaText = (() => {
       const rest = (restAfterJson || "").trimStart();
       if (rest) return rest;
@@ -2707,14 +3071,48 @@ function conversationForExport(conv) {
 }
 
 function downloadBlob(filename, blob) {
+  try {
+    // Legacy Edge/IE
+    // @ts-ignore
+    if (typeof navigator !== "undefined" && navigator.msSaveOrOpenBlob) {
+      // @ts-ignore
+      navigator.msSaveOrOpenBlob(blob, filename);
+      return;
+    }
+  } catch { }
+
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
+  a.style.display = "none";
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
-  a.click();
+  let clicked = false;
+
+  const ua = String(navigator?.userAgent || "");
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator?.platform === "MacIntel" && navigator?.maxTouchPoints > 1);
+  const isSafari = /Safari\//.test(ua) && !/Chrome\//.test(ua) && !/Chromium\//.test(ua) && !/Edg\//.test(ua);
+  try {
+    a.click();
+    clicked = true;
+  } catch { }
   a.remove();
-  URL.revokeObjectURL(url);
+  // Revoke async to avoid canceling the download in some browsers.
+  window.setTimeout(() => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch { }
+  }, 1500);
+
+  // Fallback: if the browser blocks programmatic downloads, at least open the blob
+  // so the user can save it manually.
+  // iOS/Safari often ignores `download` for blob URLs; opening a tab is more reliable.
+  if (!clicked || isIOS || isSafari) {
+    try {
+      const w = window.open(url, "_blank", "noopener,noreferrer");
+      if (!w) window.location.assign(url);
+    } catch { }
+  }
 }
 
 function parseFilenameFromContentDisposition(headerValue) {
@@ -2729,41 +3127,96 @@ function parseFilenameFromContentDisposition(headerValue) {
 }
 
 async function exportConversationDocx(convId) {
-  const conv = conversations.find((x) => x.id === convId);
+  const conv = conversations.find((x) => String(x.id) === String(convId));
   const payload = conversationForExport(conv);
-  if (!payload) return;
+  if (!payload) {
+    toast("Conversa não encontrada para exportação.");
+    return;
+  }
   try {
-    const res = await fetch(`${BACKEND_BASE}/export/conversation/docx`, {
+    toast("Gerando Word…");
+    try {
+      ptLog("export:req", { kind: "docx", convId: String(convId || ""), msgCount: payload.messages?.length ?? null });
+    } catch { }
+    const res = await authFetch(`${BACKEND_BASE}/export/conversation/docx`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversation: payload }),
     });
-    if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`.trim());
     const blob = await res.blob();
     const name = parseFilenameFromContentDisposition(res.headers.get("content-disposition")) || "conversa.docx";
+    try {
+      ptLog("export:ok", { kind: "docx", status: res.status, bytes: blob?.size ?? null, name: String(name || "") });
+    } catch { }
     downloadBlob(name, blob);
-  } catch {
-    toast("Falha ao gerar documento.");
+    try { toast("Download iniciado."); } catch { }
+  } catch (e) {
+    console.error("exportConversationDocx failed", e);
+    try {
+      ptLog("export:fail", { kind: "docx", err: String(e?.message || e) });
+    } catch { }
+    toast(`Falha ao gerar documento. ${String(e?.message || "").slice(0, 120)}`.trim());
   }
 }
 
 async function exportConversationPdf(convId) {
-  const conv = conversations.find((x) => x.id === convId);
+  const conv = conversations.find((x) => String(x.id) === String(convId));
   const payload = conversationForExport(conv);
-  if (!payload) return;
+  if (!payload) {
+    toast("Conversa não encontrada para exportação.");
+    return;
+  }
   try {
-    const res = await fetch(`${BACKEND_BASE}/export/conversation/pdf`, {
+    toast("Gerando PDF…");
+    try {
+      ptLog("export:req", { kind: "pdf", convId: String(convId || ""), msgCount: payload.messages?.length ?? null });
+    } catch { }
+    const res = await authFetch(`${BACKEND_BASE}/export/conversation/pdf`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ conversation: payload }),
     });
-    if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`.trim());
     const blob = await res.blob();
     const name = parseFilenameFromContentDisposition(res.headers.get("content-disposition")) || "conversa.pdf";
+    try {
+      ptLog("export:ok", { kind: "pdf", status: res.status, bytes: blob?.size ?? null, name: String(name || "") });
+    } catch { }
     downloadBlob(name, blob);
-  } catch {
-    toast("Falha ao gerar documento.");
+    try { toast("Download iniciado."); } catch { }
+  } catch (e) {
+    console.error("exportConversationPdf failed", e);
+    try {
+      ptLog("export:fail", { kind: "pdf", err: String(e?.message || e) });
+    } catch { }
+    toast(`Falha ao gerar documento. ${String(e?.message || "").slice(0, 120)}`.trim());
   }
+}
+
+function exportConversationTxt(convId) {
+  const conv = conversations.find((x) => String(x.id) === String(convId));
+  const payload = conversationForExport(conv);
+  if (!payload) {
+    toast("Conversa não encontrada para exportação.");
+    return;
+  }
+  try { toast("Baixando TXT…"); } catch { }
+  const lines = [];
+  lines.push(`Conversa: ${payload.title || "Conversa"}`);
+  lines.push(`Sessão: ${payload.id}`);
+  if (payload.createdAt) lines.push(`Criada em: ${payload.createdAt}`);
+  if (payload.updatedAt) lines.push(`Atualizada em: ${payload.updatedAt}`);
+  lines.push("");
+  for (const m of payload.messages || []) {
+    const role = String(m.role || "").toLowerCase();
+    const label = role === "user" ? "Você" : role === "assistant" ? "Assistente" : "Sistema";
+    lines.push(`${label}:`);
+    lines.push(String(m.content || ""));
+    lines.push("");
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+  downloadBlob("conversa.txt", blob);
 }
 
 // =============================
@@ -2773,7 +3226,7 @@ function setDownloadsUse(on) {
   useDownloadsInChat = !!on;
   try {
     localStorage.setItem(DOWNLOADS_USE_KEY, useDownloadsInChat ? "1" : "0");
-  } catch {}
+  } catch { }
   if (el.downloadsUseToggle) el.downloadsUseToggle.checked = useDownloadsInChat;
 }
 
@@ -2784,7 +3237,7 @@ function openDownloadsPanel() {
   refreshDownloadsList();
   try {
     el.downloadsSearchInput?.focus?.();
-  } catch {}
+  } catch { }
 }
 
 function closeDownloadsPanel() {
@@ -2909,7 +3362,7 @@ function renderDownloadsResults(items) {
 
 async function refreshDownloadsList({ silent = false } = {}) {
   try {
-    const res = await fetch(`${BACKEND_BASE}/downloads`, { method: "GET" });
+    const res = await authFetch(`${BACKEND_BASE}/downloads`, { method: "GET" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const files = Array.isArray(data?.files) ? data.files : [];
@@ -2928,7 +3381,7 @@ async function uploadDownloadFiles(files) {
   const fd = new FormData();
   for (const f of list) fd.append("files", f, f.name);
   try {
-    const res = await fetch(`${BACKEND_BASE}/downloads/upload`, { method: "POST", body: fd });
+    const res = await authFetch(`${BACKEND_BASE}/downloads/upload`, { method: "POST", body: fd });
     if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
     toast(list.length > 1 ? "Documentos enviados." : "Documento enviado.");
     await refreshDownloadsList();
@@ -2944,7 +3397,7 @@ async function runDownloadsSearch() {
     return;
   }
   try {
-    const res = await fetch(`${BACKEND_BASE}/downloads/search`, {
+    const res = await authFetch(`${BACKEND_BASE}/downloads/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: q, top_k: DOWNLOADS_TOP_K }),
@@ -2998,7 +3451,7 @@ function bindEvents() {
     setTimeout(() => {
       try {
         el.searchInput?.focus?.();
-      } catch {}
+      } catch { }
     }, 0);
   });
 
@@ -3034,7 +3487,7 @@ function bindEvents() {
     if (!id) return;
     if (!confirm("Excluir este arquivo?")) return;
     try {
-      const res = await fetch(`${BACKEND_BASE}/downloads/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const res = await authFetch(`${BACKEND_BASE}/downloads/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast("Excluído.");
       await refreshDownloadsList();
@@ -3057,7 +3510,7 @@ function bindEvents() {
     else autoResizeEmpty();
     try {
       target?.focus?.();
-    } catch {}
+    } catch { }
     toast("Trecho inserido no chat.");
   });
 
@@ -3128,7 +3581,7 @@ function bindEvents() {
         const isEditable = !!ae?.isContentEditable || tag === "textarea" || tag === "input";
         if (isEditable) return;
         focusComposer();
-      } catch {}
+      } catch { }
     },
     true
   );
@@ -3144,7 +3597,7 @@ function bindEvents() {
       },
       { capture: true }
     );
-  } catch {}
+  } catch { }
 
   el.emptySuggestions?.addEventListener?.("click", (e) => {
     const btn = e.target?.closest?.("button.pill");
@@ -3157,7 +3610,7 @@ function bindEvents() {
     updateComposerControls();
     try {
       el.emptyInput.focus();
-    } catch {}
+    } catch { }
   });
 
   el.themeToggle?.addEventListener?.("click", () => {
@@ -3173,6 +3626,10 @@ function bindEvents() {
   });
 
   el.modeMenu?.addEventListener?.("click", (e) => {
+    try {
+      e?.preventDefault?.();
+      e?.stopPropagation?.();
+    } catch { }
     const btn = e.target?.closest?.("button.menu-item");
     if (!btn) return;
     const action = String(btn.dataset.action || "");
@@ -3189,6 +3646,13 @@ function bindEvents() {
       persistState();
       closeMenus({ restoreFocus: true });
       toast(`Streaming: ${streamingEnabled ? "ligado" : "desligado"} (${streamingEnabled ? "/chat/stream" : "/chat"})`);
+      return;
+    }
+    if (action === "toggle-precision") {
+      precisionMode = !precisionMode;
+      persistState();
+      closeMenus({ restoreFocus: true });
+      toast(`Modo Precisão: ${precisionMode ? "ligado" : "desligado"}`);
       return;
     }
   });
@@ -3209,12 +3673,24 @@ function bindEvents() {
   });
 
   el.itemMenu?.addEventListener?.("click", (e) => {
+    // Important: opening another menu empties/hides this one, which can confuse the
+    // document-level click handler (it might think the click was "outside" and close the new menu).
+    try {
+      e?.preventDefault?.();
+      e?.stopPropagation?.();
+    } catch { }
     const btn = e.target?.closest?.("button.menu-item");
     if (!btn) return;
     const action = btn.dataset.action;
     const id = btn.dataset.id;
     if (action === "download") {
-      openExportMenu(lastMenuAnchorEl || btn, id);
+      // Use the clicked menu item as anchor so the export menu always appears where the user is looking.
+      const anchor =
+        (lastMenuAnchorEl && lastMenuAnchorEl.isConnected ? lastMenuAnchorEl : null) ||
+        (btn && btn.isConnected ? btn : null) ||
+        el.itemMenu ||
+        el.conversationList;
+      openExportMenu(anchor, id);
       return;
     }
     closeMenus({ restoreFocus: true });
@@ -3223,12 +3699,17 @@ function bindEvents() {
   });
 
   el.exportMenu?.addEventListener?.("click", async (e) => {
+    try {
+      e?.preventDefault?.();
+      e?.stopPropagation?.();
+    } catch { }
     const btn = e.target?.closest?.("button.menu-item");
     if (!btn) return;
     const action = btn.dataset.action;
     const id = btn.dataset.id;
     closeMenus({ restoreFocus: true });
-    if (action === "export-docx") await exportConversationDocx(id);
+    if (action === "export-txt") exportConversationTxt(id);
+    else if (action === "export-docx") await exportConversationDocx(id);
     else if (action === "export-pdf") await exportConversationPdf(id);
   });
 
@@ -3249,6 +3730,7 @@ function bindEvents() {
 // Boot
 // =============================
 function boot() {
+  enforceAuthBaseConsistency();
   initTheme();
   loadState();
   persistState();
@@ -3282,7 +3764,7 @@ function boot() {
 
   try {
     el.emptyInput?.focus?.();
-  } catch {}
+  } catch { }
 }
 
 // Fallback send handlers: if boot/bindEvents crashed mid-way, keep chat usable.
@@ -3296,7 +3778,7 @@ function boot() {
       if (window.__paytech?.bindOk) return;
       try {
         window.__paytech?.bootOnce?.();
-      } catch {}
+      } catch { }
       const btn = e.target?.closest?.("#sendBtn");
       if (!btn) return;
       e.preventDefault();
@@ -3317,7 +3799,7 @@ function boot() {
 
       try {
         window.__paytech?.bootOnce?.();
-      } catch {}
+      } catch { }
 
       // Re-check after attempting to boot.
       if (window.__paytech?.bindOk) return;
@@ -3351,7 +3833,7 @@ function bootOnce() {
     _captureEarlyError("boot", err);
     try {
       toast(`Falha ao iniciar UI: ${String(err?.message || err)}`.trim(), { ms: 7000 });
-    } catch {}
+    } catch { }
   }
 }
 window.__paytech.bootOnce = bootOnce;
@@ -3361,4 +3843,4 @@ if (document.readyState === "loading") {
 } else {
   // Handles dynamic script loading (e.g. script shim injected after DOMContentLoaded).
   setTimeout(bootOnce, 0);
-} 
+}

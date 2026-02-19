@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="pt-br">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Login - PayTech AI</title>
+  <link rel="icon" id="appFavicon" href="./assets/pay.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" />
+  <link rel="stylesheet" href="style.css?v=20260218_001" />
+  <style>
+    .auth-layout {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: var(--space-24);
+      background:
+        radial-gradient(1200px 560px at 12% -10%, rgba(255, 255, 255, 0.04), transparent 55%),
+        radial-gradient(900px 520px at 92% 0%, rgba(255, 255, 255, 0.03), transparent 52%),
+        var(--bg);
+    }
+
+    .auth-card {
+      width: min(440px, 100%);
+      border: 1px solid var(--composer-border);
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, var(--composer-surface-top), var(--composer-surface-bottom));
+      box-shadow: var(--shadow);
+      padding: var(--space-24);
+      display: grid;
+      gap: var(--space-16);
+    }
+
+    .auth-brand {
+      display: grid;
+      justify-items: center;
+      gap: var(--space-8);
+    }
+
+    .auth-brand img {
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+    }
+
+    .auth-brand h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+
+    .auth-sub {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      text-align: center;
+    }
+
+    .auth-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-8);
+    }
+
+    .auth-tab {
+      border-radius: var(--radius);
+      border: 1px solid var(--composer-border);
+      background: transparent;
+      color: var(--text);
+      min-height: 40px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+
+    .auth-tab.active {
+      background: var(--primary);
+      color: var(--primary-contrast);
+      border-color: transparent;
+    }
+
+    .auth-field {
+      display: grid;
+      gap: var(--space-8);
+      margin-top: 10px;
+    }
+
+    .auth-field label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .auth-field input {
+      width: 100%;
+      border-radius: var(--radius);
+      border: 1px solid var(--composer-border);
+      background: transparent;
+      color: var(--text);
+      padding: var(--space-12);
+      outline: none;
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .auth-field input:focus {
+      border-color: var(--focus-ring);
+      box-shadow: var(--focus-glow);
+    }
+
+    .auth-pass-wrap {
+      position: relative;
+    }
+
+    .auth-pass-wrap input {
+      padding-right: 88px;
+    }
+
+    .auth-pass-toggle {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      border: 1px solid var(--composer-border);
+      background: transparent;
+      color: var(--muted);
+      border-radius: var(--radius);
+      min-height: 30px;
+      padding: 0 10px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .auth-pass-toggle:hover {
+      color: var(--text);
+    }
+
+    .auth-submit {
+      width: 100%;
+      min-height: 44px;
+      border-radius: var(--radius);
+      border: none;
+      background: var(--primary);
+      color: var(--primary-contrast);
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 14px;
+    }
+
+    .auth-error {
+      min-height: 18px;
+      color: #fca5a5;
+      font-size: 13px;
+      line-height: 1.4;
+      margin-top: 12px;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="auth-layout" aria-label="Autenticação">
+    <section class="auth-card">
+      <div class="auth-brand">
+        <img src="./assets/pay.png" alt="PayTech logo" />
+        <h1>PayTech AI Assistant</h1>
+        <p id="authSub" class="auth-sub">Entre para acessar o chat</p>
+      </div>
+
+      <div class="auth-tabs">
+        <button id="tabLogin" class="auth-tab active" type="button">Entrar</button>
+        <button id="tabRegister" class="auth-tab" type="button">Criar conta</button>
+      </div>
+
+      <form id="authForm" novalidate>
+        <div id="tenantField" class="auth-field" hidden>
+          <label for="authTenantName">Nome da empresa</label>
+          <input id="authTenantName" type="text" autocomplete="organization" />
+        </div>
+
+        <div class="auth-field">
+          <label for="authEmail">Email</label>
+          <input id="authEmail" type="email" autocomplete="email" required />
+        </div>
+
+        <div class="auth-field">
+          <label for="authPass">Senha</label>
+          <div class="auth-pass-wrap">
+            <input id="authPass" type="password" autocomplete="current-password" required />
+            <button id="authPassToggle" class="auth-pass-toggle" type="button" aria-label="Mostrar senha">Mostrar</button>
+          </div>
+        </div>
+
+        <div id="authError" class="auth-error" role="status" aria-live="polite"></div>
+        <button id="authSubmit" class="auth-submit" type="submit">Entrar</button>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      var TOKEN_KEY = "PAYTECH_TOKEN";
+      var AUTH_USER_KEY = "PAYTECH_USER";
+      var AUTH_BASE_KEY = "PAYTECH_AUTH_BASE";
+      var BACKEND_DEFAULT = "http://127.0.0.1:8000";
+      var BACKEND_BASE_KEY = "paytech.backendBase";
+      var mode = "login";
+
+      function isAuthenticated() {
+        try {
+          return !!String(localStorage.getItem(TOKEN_KEY) || "").trim();
+        } catch (e) {
+          return false;
+        }
+      }
+
+      function resolveBackendBase() {
+        try {
+          var url = new URL(window.location.href);
+          var qp = String(url.searchParams.get("api") || "").trim();
+          if (qp) {
+            localStorage.setItem(BACKEND_BASE_KEY, qp);
+            return qp;
+          }
+          var saved = String(localStorage.getItem(BACKEND_BASE_KEY) || "").trim();
+          if (saved === "http://localhost:8000") {
+            saved = "http://127.0.0.1:8000";
+            localStorage.setItem(BACKEND_BASE_KEY, saved);
+          }
+          return saved || BACKEND_DEFAULT;
+        } catch (e) {
+          return BACKEND_DEFAULT;
+        }
+      }
+
+      function setMode(nextMode) {
+        mode = nextMode === "register" ? "register" : "login";
+        tabLogin.classList.toggle("active", mode === "login");
+        tabRegister.classList.toggle("active", mode === "register");
+        tenantField.hidden = mode !== "register";
+        authSubmit.textContent = mode === "register" ? "Criar conta" : "Entrar";
+        authSub.textContent = mode === "register" ? "Crie a empresa e o primeiro usuário" : "Entre para acessar o chat";
+        authError.textContent = "";
+      }
+
+      function parseError(text, fallback) {
+        var raw = String(text || "").trim();
+        if (!raw) return fallback;
+        try {
+          var j = JSON.parse(raw);
+          if (typeof j.detail === "string") return j.detail;
+          if (j.detail && typeof j.detail === "object") return JSON.stringify(j.detail);
+        } catch (e) {}
+        return raw.slice(0, 220);
+      }
+
+      function backendCandidates(base) {
+        var out = [];
+        var current = String(base || "").trim();
+        if (current) out.push(current);
+        var alt = current.replace("127.0.0.1:8000", "127.0.0.1:8001").replace("localhost:8000", "127.0.0.1:8001");
+        if (alt && out.indexOf(alt) === -1) out.push(alt);
+        if (out.indexOf("http://127.0.0.1:8001") === -1) out.push("http://127.0.0.1:8001");
+        return out;
+      }
+
+      if (isAuthenticated()) {
+        window.location.replace("index.html");
+        return;
+      }
+
+      var form = document.getElementById("authForm");
+      var tabLogin = document.getElementById("tabLogin");
+      var tabRegister = document.getElementById("tabRegister");
+      var tenantField = document.getElementById("tenantField");
+      var tenantName = document.getElementById("authTenantName");
+      var authEmail = document.getElementById("authEmail");
+      var authPass = document.getElementById("authPass");
+      var authPassToggle = document.getElementById("authPassToggle");
+      var authError = document.getElementById("authError");
+      var authSubmit = document.getElementById("authSubmit");
+      var authSub = document.getElementById("authSub");
+
+      tabLogin.addEventListener("click", function () { setMode("login"); });
+      tabRegister.addEventListener("click", function () { setMode("register"); });
+      authPassToggle.addEventListener("click", function () {
+        var isHidden = authPass.type === "password";
+        authPass.type = isHidden ? "text" : "password";
+        authPassToggle.textContent = isHidden ? "Ocultar" : "Mostrar";
+        authPassToggle.setAttribute("aria-label", isHidden ? "Ocultar senha" : "Mostrar senha");
+      });
+      setMode("login");
+
+      form.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        authError.textContent = "";
+
+        var email = String(authEmail.value || "").trim().toLowerCase();
+        var pass = String(authPass.value || "");
+        var company = String(tenantName.value || "").trim();
+
+        if (!email || !pass) {
+          authError.textContent = "Informe email e senha.";
+          return;
+        }
+        if (mode === "register" && !company) {
+          authError.textContent = "Informe o nome da empresa.";
+          return;
+        }
+
+        var base = resolveBackendBase();
+        var endpoint = mode === "register" ? "/auth/register" : "/auth/login";
+        var body = mode === "register"
+          ? { tenant_name: company, email: email, password: pass }
+          : { email: email, username: email, password: pass };
+
+        var attempt = Promise.reject(new Error("Falha na autenticação."));
+        backendCandidates(base).forEach(function (candidate) {
+          attempt = attempt.catch(function () {
+            return fetch(candidate + endpoint, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body)
+            }).then(function (res) {
+              if (!res.ok) {
+                if (mode === "register" && res.status === 404) {
+                  throw new Error("Cadastro indisponível neste backend.");
+                }
+                return res.text().then(function (txt) {
+                  throw new Error(parseError(txt, "Falha na autenticação."));
+                });
+              }
+              localStorage.setItem(BACKEND_BASE_KEY, candidate);
+              return res.json();
+            });
+          });
+        });
+
+        attempt
+          .then(function (data) {
+            var token = String((data && (data.token || data.access_token)) || "").trim();
+            if (!token) throw new Error("Token ausente.");
+            try {
+              localStorage.setItem(TOKEN_KEY, token);
+              localStorage.setItem(AUTH_USER_KEY, email);
+              localStorage.setItem(AUTH_BASE_KEY, String(localStorage.getItem(BACKEND_BASE_KEY) || ""));
+              if (data && data.tenant && data.tenant.id) localStorage.setItem("PAYTECH_TENANT_ID", String(data.tenant.id));
+              if (data && data.user && data.user.id) localStorage.setItem("PAYTECH_USER_ID", String(data.user.id));
+            } catch (e) {}
+            window.location.replace("index.html");
+          })
+          .catch(function (e) {
+            var m = String(e && e.message || "Falha na autenticação.");
+            if (mode === "register" && m.indexOf("Cadastro indisponível") >= 0) {
+              authError.textContent = "Cadastro não encontrado no backend atual. Reinicie o backend atualizado.";
+              return;
+            }
+            authError.textContent = m;
+          });
+      });
+    })();
+  </script>
+</body>
+
+</html>

@@ -4,6 +4,23 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script>
+    (function () {
+      try {
+        var TOKEN_KEY = "PAYTECH_TOKEN";
+        var token = (localStorage.getItem(TOKEN_KEY) || "").trim();
+        if (!token) {
+          if (window.location.pathname.toLowerCase().indexOf("login.html") === -1) {
+            window.location.replace("login.html");
+          }
+        }
+      } catch (e) {
+        if (window.location.pathname.toLowerCase().indexOf("login.html") === -1) {
+          window.location.replace("login.html");
+        }
+      }
+    })();
+  </script>
   <!-- DEV: avoid stale cached JS/CSS while iterating -->
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
@@ -25,6 +42,11 @@
   <!-- Markdown + sanitize (leves, produção) -->
   <script defer src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+
+  <!-- KaTeX (math rendering) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 
   <!-- Early diagnostics stub: allows DevTools commands before `app.js` finishes loading. -->
   <script>
@@ -51,13 +73,13 @@
         <button class="btn subtle novo-chat" id="newChat" type="button" title="Novo chat" aria-label="Novo chat"
           data-tooltip="Novo chat">
           <span class="ms" aria-hidden="true">edit_square</span>
-          <span>Novo chat</span>
+          <span>New chat</span>
         </button>
 
         <button class="btn subtle" id="downloadBtn" type="button" title="Download (Documentos)"
           aria-label="Abrir biblioteca de documentos" data-tooltip="Downloads">
           <span class="ms" aria-hidden="true">download</span>
-          <span>Download</span>
+          <span>Documents</span>
         </button>
 
         <button class="btn subtle search-btn" id="searchBtn" type="button" title="Buscar" aria-label="Buscar"
@@ -69,7 +91,7 @@
 
       <div class="sb-search">
         <span class="ms search-ico" aria-hidden="true">search</span>
-        <input id="searchInput" type="search" placeholder="Buscar" autocomplete="off" />
+        <input id="searchInput" type="search" placeholder="Search" autocomplete="off" />
       </div>
 
       <nav class="sb-list" id="conversationList" aria-label="Lista de conversas" role="listbox"></nav>
@@ -92,6 +114,9 @@
         </div>
 
         <div class="topbar-actions">
+          <button class="icon-btn" id="logoutBtn" type="button" aria-label="Sair" title="Sair">
+            <span class="ms" aria-hidden="true">logout</span>
+          </button>
           <button class="icon-btn" id="responseModeBtn" type="button" aria-label="Modo de resposta"
             title="Modo de resposta">
             <span class="ms" aria-hidden="true">tune</span>
@@ -106,8 +131,8 @@
       <!-- Empty state (home) -->
       <section class="empty-state" id="emptyState" aria-label="Início" hidden>
         <div class="empty-inner">
-          <h1 class="empty-title">Olá. Como posso ajudar você hoje?</h1>
-          <p class="empty-sub">Pergunte qualquer coisa.</p>
+          <h1 class="empty-title">Olá. Sou o assistente virtual da PayTech!</h1>
+          <p class="empty-sub">Como posso ajudar você hoje?</p>
 
           <div class="suggestions" id="emptySuggestions" role="list" aria-label="Sugestões">
             <button class="pill" type="button" data-suggest="Criar resumo" role="listitem">Criar resumo</button>
@@ -187,7 +212,7 @@
         </div>
 
         <div class="dl-search">
-          <input id="downloadsSearchInput" type="search" placeholder="Buscar nos documentos..." autocomplete="off" />
+          <input id="downloadsSearchInput" type="search" placeholder="Search documents..." autocomplete="off" />
           <button class="icon-btn" id="downloadsSearchBtn" type="button" aria-label="Buscar" title="Buscar">
             <span class="ms" aria-hidden="true">search</span>
           </button>
@@ -211,7 +236,24 @@
       hidden />
   </section>
 
-  <script defer src="app.js?v=20260210_025"></script>
+  <script defer src="app.js?v=20260219_009"></script>
+  <script>
+    (function () {
+      var btn = document.getElementById("logoutBtn");
+      if (!btn) return;
+      btn.addEventListener("click", function () {
+        try {
+          localStorage.removeItem("PAYTECH_TOKEN");
+          localStorage.removeItem("PAYTECH_AUTH");
+          localStorage.removeItem("PAYTECH_USER");
+          localStorage.removeItem("PAYTECH_USER_ID");
+          localStorage.removeItem("PAYTECH_TENANT_ID");
+          localStorage.removeItem("PAYTECH_AUTH_EXP");
+        } catch (e) { }
+        window.location.replace("login.html");
+      });
+    })();
+  </script>
 
 </body>
 
