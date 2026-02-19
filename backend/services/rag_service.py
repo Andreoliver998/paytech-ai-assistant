@@ -14,6 +14,23 @@ from .openai_service import embed_texts, cosine_similarity
 from ..settings import settings
 from ..utils.files import load_kb, save_kb
 
+FULLTEXTS_DIR = (Path(settings.PAYTECH_DATA_DIR) if settings.PAYTECH_DATA_DIR else (Path(__file__).resolve().parents[1] / "data")) / "fulltexts"
+FULLTEXTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _fulltext_path(tenant_id: str, file_id: str) -> Path:
+    tid = (tenant_id or "unknown").strip() or "unknown"
+    fid = (file_id or "unknown").strip() or "unknown"
+    p = FULLTEXTS_DIR / tid
+    p.mkdir(parents=True, exist_ok=True)
+    return p / f"{fid}.txt"
+
+
+def save_full_text(*, tenant_id: str, file_id: str, text: str) -> str:
+    p = _fulltext_path(tenant_id, file_id)
+    p.write_text(text or "", encoding="utf-8", errors="replace")
+    return str(p)
+
 
 def split_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     text = re.sub(r"\s+", " ", text).strip()
@@ -120,6 +137,7 @@ def extract_xlsx_text(path: Path) -> str:
 def index_file_and_save(
     *,
     db: Session,
+    tenant_id: str,
     file_id: str,
     filename: str,
     ext: str,
@@ -139,22 +157,50 @@ def index_file_and_save(
     embeddings = embed_texts(chunks, model=settings.OPENAI_EMBED_MODEL)
 
     # upsert arquivo
-    f = db.get(FileDB, file_id)
+    f = db.query(FileDB).filter(FileDB.file_id == file_id, FileDB.tenant_id == tenant_id).first()
     if not f:
         f = FileDB(
             file_id=file_id,
+            tenant_id=tenant_id,
             filename=filename,
             ext=ext,
             stored_path=str(stored_path),
             size=stored_path.stat().st_size if stored_path.exists() else 0,
         )
         db.add(f)
-        db.commit()
+        db.flush()
+
+    # Persist full text to disk (best-effort) for deterministic ops.
+    try:
+        f.full_text_path = save_full_text(tenant_id=tenant_id, file_id=file_id, text=full_text)
+    except Exception:
+        pass
+
+    # Persist basic metadata for deterministic queries (best-effort).
+    try:
+        f.text_chars = int(len(full_text or ""))
+    except Exception:
+        pass
+    try:
+        ext_low = (ext or "").lower().strip(".")
+        if ext_low in ("csv", "xlsx"):
+            p = Path(str(stored_path))
+            if ext_low == "xlsx":
+                df = pd.read_excel(p)
+            else:
+                df = pd.read_csv(p)
+            f.rows = int(df.shape[0])
+            f.cols = int(df.shape[1])
+            f.columns_json = json.dumps([str(c) for c in list(df.columns)], ensure_ascii=False)
+    except Exception:
+        pass
+    db.commit()
 
     # salva chunks no DB
     added = 0
     for text, emb in zip(chunks, embeddings):
         row = KBChunkDB(
+            tenant_id=tenant_id,
             file_id=file_id,
             filename=filename,
             ext=ext,
@@ -184,7 +230,7 @@ def index_file_and_save(
     return added
 
 
-def retrieve_context(db: Session, query: str, top_k: int) -> List[Dict[str, Any]]:
+def retrieve_context(db: Session, tenant_id: str, query: str, top_k: int) -> List[Dict[str, Any]]:
     """
     Recupera chunks por similaridade de cosseno (embeddings em DB).
     """
@@ -197,7 +243,7 @@ def retrieve_context(db: Session, query: str, top_k: int) -> List[Dict[str, Any]
         return []
     q_emb = q_emb[0]
 
-    rows = db.query(KBChunkDB).all()
+    rows = db.query(KBChunkDB).filter(KBChunkDB.tenant_id == tenant_id).all()
     scored: List[Tuple[float, KBChunkDB]] = []
 
     for r in rows:
@@ -214,6 +260,85 @@ def retrieve_context(db: Session, query: str, top_k: int) -> List[Dict[str, Any]
         out.append(
             {
                 "score": float(score),
+                "chunk_id": int(r.id),
+                "file_id": r.file_id,
+                "filename": r.filename,
+                "ext": r.ext,
+                "text": r.text,
+            }
+        )
+    return out
+
+
+def retrieve_context_lexical(db: Session, tenant_id: str, query: str, top_k: int) -> List[Dict[str, Any]]:
+    """
+    Simple lexical retrieval (case-insensitive) to complement embeddings retrieval.
+    Scoring is intentionally lightweight: term frequency + density bonus.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    terms = re.findall(r"[\wÀ-ÿ]{2,}", q.lower(), flags=re.UNICODE)
+    # Keep only a handful of distinct terms (avoid over-penalizing long questions).
+    seen = set()
+    uniq: List[str] = []
+    for t in terms:
+        if t in seen:
+            continue
+        seen.add(t)
+        uniq.append(t)
+        if len(uniq) >= 10:
+            break
+    if not uniq:
+        return []
+
+    rows = (
+        db.query(KBChunkDB)
+        .filter(KBChunkDB.tenant_id == tenant_id)
+        .order_by(KBChunkDB.id.asc())
+        .all()
+    )
+
+    scored: List[Tuple[float, KBChunkDB]] = []
+    for r in rows:
+        text = (r.text or "")
+        low = text.lower()
+        tf = 0
+        hits = 0
+        first_pos = None
+        last_pos = None
+        for term in uniq:
+            c = low.count(term)
+            if c <= 0:
+                continue
+            hits += 1
+            tf += c
+            p = low.find(term)
+            if p >= 0:
+                first_pos = p if first_pos is None else min(first_pos, p)
+                last_pos = p + len(term) if last_pos is None else max(last_pos, p + len(term))
+
+        if tf <= 0:
+            continue
+
+        # Base: term frequency, bonus for covering multiple distinct terms.
+        score = float(tf) + (2.0 * float(hits - 1))
+        # Density bonus: if hits occur close together, prefer this chunk.
+        if first_pos is not None and last_pos is not None and last_pos > first_pos:
+            span = max(1, last_pos - first_pos)
+            score += 6.0 * (1.0 / float(span)) * 100.0
+        # Mild normalization by length.
+        score *= 800.0 / max(200.0, float(len(low)))
+        scored.append((float(score), r))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out: List[Dict[str, Any]] = []
+    for score, r in scored[: max(0, int(top_k or 6))]:
+        out.append(
+            {
+                "score": float(score),
+                "chunk_id": int(r.id),
                 "file_id": r.file_id,
                 "filename": r.filename,
                 "ext": r.ext,
@@ -225,26 +350,39 @@ def retrieve_context(db: Session, query: str, top_k: int) -> List[Dict[str, Any]
 
 def build_rag_system_prompt(chunks: List[Dict[str, Any]]) -> str:
     """
-    Prompt RAG “ChatGPT-like”: use o contexto quando relevante, cite o arquivo e não invente.
+    Prompt RAG de alta precisao: o documento e a unica fonte de verdade.
     """
     if not chunks:
         return (
-            "Você tem acesso a documentos enviados pelo usuário. "
-            "Se o usuário pedir algo sobre documentos, peça para enviar/selecionar o arquivo."
+            "Você é um analisador técnico de documentos.\n"
+            "Sua única fonte de verdade é o CONTEXTO fornecido.\n"
+            "Se a informação não estiver explicitamente no CONTEXTO, responda apenas:\n"
+            "'Essa informação não consta no documento analisado.'"
         )
 
     parts: List[str] = []
     parts.append(
-        "Você tem acesso ao CONTEXTO extraído de documentos do usuário.\n"
-        "Regras:\n"
-        "- Use o contexto apenas quando for relevante.\n"
-        "- Se o contexto não contiver a resposta, diga que não encontrou no documento.\n"
-        "- Ao usar o contexto, cite a fonte no texto (ex.: 'Fonte: arquivo.pdf').\n"
-        "- Não invente números, nomes ou conclusões não presentes.\n"
+        "Você é um analisador técnico de documentos.\n"
+        "Sua única fonte de verdade é o CONTEXTO fornecido.\n"
+        "\nREGRAS (OBRIGATÓRIAS):\n"
+        "- NÃO assumir, inferir ou sugerir informações externas.\n"
+        "- NÃO responder com conselhos genéricos.\n"
+        "- NUNCA sugerir consultar aplicativo, banco ou outra fonte externa.\n"
+        "- PROIBIDO usar frases como:\n"
+        "  - 'Você pode verificar...'\n"
+        "  - 'Recomendo consultar...'\n"
+        "  - 'Caso contrário...'\n"
+        "  - 'Se precisar...'\n"
+        "- Se a informação existir no CONTEXTO, responda com precisão absoluta.\n"
+        "- Se a informação NÃO estiver explicitamente no CONTEXTO, responda apenas:\n"
+        "  'Essa informação não consta no documento analisado.'\n"
+        "\nPRECISÃO:\n"
+        "- Para perguntas como 'qual o valor', 'qual a data', 'quantas parcelas', 'qual o número':\n"
+        "  localize explicitamente no CONTEXTO e devolva exatamente como está no documento.\n"
         "\nCONTEXTO:\n"
     )
     for i, c in enumerate(chunks, start=1):
         parts.append(
-            f"\n[Trecho {i}] (Fonte: {c.get('filename')} | score={c.get('score'):.3f})\n{c.get('text')}\n"
+            f"\n[Trecho {i}] (Fonte: {c.get('filename')})\n{c.get('text')}\n"
         )
     return "".join(parts)

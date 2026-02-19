@@ -11,6 +11,8 @@ from ..models import DownloadChunkDB, DownloadChunkMetaDB, DownloadFileDB
 from .openai_service import cosine_similarity, embed_texts
 from .rag_service import extract_csv_text, extract_pdf_text, extract_xlsx_text, split_text_tokens
 from ..settings import settings
+from .rag_service import save_full_text
+import pandas as pd
 
 
 ALLOWED_EXTS = {"pdf", "xlsx", "csv", "txt"}
@@ -103,6 +105,7 @@ def _make_snippet(text: str, terms: List[str], max_len: int = 360) -> str:
 def index_download_file(
     *,
     db: Session,
+    tenant_id: str,
     file_id: str,
     filename: str,
     ext: str,
@@ -119,17 +122,45 @@ def index_download_file(
 
     embeddings = _try_embed_texts(chunks)
 
-    f = db.get(DownloadFileDB, file_id)
+    f = (
+        db.query(DownloadFileDB)
+        .filter(DownloadFileDB.id == file_id, DownloadFileDB.tenant_id == tenant_id)
+        .first()
+    )
     if not f:
         f = DownloadFileDB(
             id=file_id,
+            tenant_id=tenant_id,
             filename=filename,
             ext=ext,
             stored_path=str(stored_path),
             size=stored_path.stat().st_size if stored_path.exists() else 0,
         )
         db.add(f)
-        db.commit()
+        db.flush()
+
+    try:
+        f.full_text_path = save_full_text(tenant_id=tenant_id, file_id=file_id, text=full_text)
+    except Exception:
+        pass
+    try:
+        f.text_chars = int(len(full_text or ""))
+    except Exception:
+        pass
+    try:
+        ext_low = (ext or "").lower().strip(".")
+        p = Path(str(stored_path))
+        if ext_low in ("csv", "xlsx"):
+            if ext_low == "xlsx":
+                df = pd.read_excel(p)
+            else:
+                df = pd.read_csv(p)
+            f.rows = int(df.shape[0])
+            f.cols = int(df.shape[1])
+            f.columns_json = json.dumps([str(c) for c in list(df.columns)], ensure_ascii=False)
+    except Exception:
+        pass
+    db.commit()
 
     added = 0
     if embeddings and len(embeddings) == len(chunks):
@@ -140,6 +171,7 @@ def index_download_file(
     for text, emb in pairs:
         row = DownloadChunkDB(
             file_id=file_id,
+            tenant_id=tenant_id,
             filename=filename,
             ext=ext,
             text=text,
@@ -170,8 +202,13 @@ def index_download_file(
     return added
 
 
-def list_downloads(db: Session) -> List[Dict[str, Any]]:
-    rows = db.query(DownloadFileDB).order_by(DownloadFileDB.createdAt.desc()).all()
+def list_downloads(db: Session, tenant_id: str) -> List[Dict[str, Any]]:
+    rows = (
+        db.query(DownloadFileDB)
+        .filter(DownloadFileDB.tenant_id == tenant_id)
+        .order_by(DownloadFileDB.createdAt.desc())
+        .all()
+    )
     out: List[Dict[str, Any]] = []
     for r in rows:
         mime = {
@@ -194,17 +231,24 @@ def list_downloads(db: Session) -> List[Dict[str, Any]]:
     return out
 
 
-def delete_download(db: Session, file_id: str) -> DownloadFileDB | None:
-    f = db.get(DownloadFileDB, file_id)
+def delete_download(db: Session, tenant_id: str, file_id: str) -> DownloadFileDB | None:
+    f = (
+        db.query(DownloadFileDB)
+        .filter(DownloadFileDB.id == file_id, DownloadFileDB.tenant_id == tenant_id)
+        .first()
+    )
     if not f:
         return None
-    db.query(DownloadChunkDB).filter(DownloadChunkDB.file_id == file_id).delete()
+    db.query(DownloadChunkDB).filter(
+        DownloadChunkDB.file_id == file_id,
+        DownloadChunkDB.tenant_id == tenant_id,
+    ).delete()
     db.delete(f)
     db.commit()
     return f
 
 
-def search_downloads(db: Session, query: str, top_k: int) -> List[Dict[str, Any]]:
+def search_downloads(db: Session, tenant_id: str, query: str, top_k: int) -> List[Dict[str, Any]]:
     q = (query or "").strip()
     if not q:
         return []
@@ -213,7 +257,7 @@ def search_downloads(db: Session, query: str, top_k: int) -> List[Dict[str, Any]
     q_embs = _try_embed_texts([q])
     q_emb = q_embs[0] if q_embs else None
 
-    rows = db.query(DownloadChunkDB).all()
+    rows = db.query(DownloadChunkDB).filter(DownloadChunkDB.tenant_id == tenant_id).all()
     scored: List[Tuple[float, DownloadChunkDB]] = []
     for r in rows:
         kw = _keyword_score(r.text or "", r.filename or "", terms)

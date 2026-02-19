@@ -68,6 +68,17 @@ class Settings(BaseSettings):
     OPENAI_EMBED_MODEL: str = "text-embedding-3-small"
     OPENAI_TIMEOUT: int = 60
 
+    # Auth (JWT)
+    JWT_SECRET: SecretStr = SecretStr("")
+    JWT_ALG: str = "HS256"
+    JWT_EXPIRES_MIN: int = 720
+    JWT_SECRET_KEY: SecretStr = SecretStr("")
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_HOURS: int = 12
+    AUTH_BOOTSTRAP_ADMIN_USER: str = "admin"
+    AUTH_BOOTSTRAP_ADMIN_PASSWORD: str = "admin123"
+    SEED_DEMO: bool = False
+
     # Diretórios/DB
     PAYTECH_DATA_DIR: Optional[str] = None
     PAYTECH_DB_URL: Optional[str] = None

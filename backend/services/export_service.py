@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import re
+import zipfile
+from xml.sax.saxutils import escape as _xml_escape
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
@@ -39,9 +41,18 @@ def _conversation_title(conv: Dict[str, Any]) -> str:
 
 
 def render_conversation_docx_bytes(conv: Dict[str, Any]) -> bytes:
-    from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Cm, Pt
+    """
+    Render DOCX bytes.
+
+    Prefers python-docx when available, but falls back to a minimal pure-Python DOCX writer
+    when python-docx (lxml) is unavailable/broken in the environment.
+    """
+    try:
+        from docx import Document
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.shared import Cm, Pt
+    except Exception:
+        return render_conversation_docx_bytes_fallback(conv)
 
     doc = Document()
     sec = doc.sections[0]
@@ -107,12 +118,21 @@ def render_conversation_docx_bytes(conv: Dict[str, Any]) -> bytes:
 
 
 def render_conversation_pdf_bytes(conv: Dict[str, Any]) -> bytes:
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import cm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, Preformatted
+    """
+    Render PDF bytes.
+
+    Prefers reportlab, but falls back to fpdf (pure-Python) when reportlab or its binary deps
+    (e.g. pillow) are unavailable/broken.
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import cm
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, Preformatted
+    except Exception:
+        return render_conversation_pdf_bytes_fallback(conv)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -228,3 +248,154 @@ def render_conversation_pdf_bytes(conv: Dict[str, Any]) -> bytes:
     doc.build(story)
     return buf.getvalue()
 
+
+def _docx_minimal_package(document_xml: str, title: str) -> bytes:
+    """
+    Build a minimal DOCX package as a zip of Office Open XML parts.
+    Enough for Word/LibreOffice to open as a document.
+    """
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>
+"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>
+"""
+    doc_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>
+"""
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    core = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+ xmlns:dc="http://purl.org/dc/elements/1.1/"
+ xmlns:dcterms="http://purl.org/dc/terms/"
+ xmlns:dcmitype="http://purl.org/dc/dcmitype/"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>{_xml_escape(title or "Conversa")}</dc:title>
+  <dc:creator>PayTech AI</dc:creator>
+  <cp:lastModifiedBy>PayTech AI</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified>
+</cp:coreProperties>
+"""
+    app = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
+ xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>PayTech AI</Application>
+</Properties>
+"""
+
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", document_xml)
+        z.writestr("word/_rels/document.xml.rels", doc_rels)
+        z.writestr("docProps/core.xml", core)
+        z.writestr("docProps/app.xml", app)
+    return bio.getvalue()
+
+
+def render_conversation_docx_bytes_fallback(conv: Dict[str, Any]) -> bytes:
+    """
+    Pure-Python DOCX export. Minimal formatting, but opens reliably without python-docx/lxml.
+    """
+    title = _conversation_title(conv)
+    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    sid = str(conv.get("id") or "")
+
+    def w_p(text: str, bold: bool = False, center: bool = False) -> str:
+        t = _xml_escape(text or "")
+        jc = '<w:jc w:val="center"/>' if center else ''
+        b = "<w:b/>" if bold else ""
+        # Preserve leading/trailing spaces
+        return (
+            f"<w:p><w:pPr>{jc}</w:pPr>"
+            f"<w:r><w:rPr>{b}</w:rPr><w:t xml:space=\"preserve\">{t}</w:t></w:r>"
+            f"</w:p>"
+        )
+
+    paras: List[str] = []
+    paras.append(w_p(f"Conversa - {title}", bold=True, center=True))
+    paras.append(w_p(f"Data/hora de exportação: {exported_at}"))
+    if sid:
+        paras.append(w_p(f"Sessão: {sid}"))
+    paras.append(w_p(""))
+
+    for m in conv.get("messages") or []:
+        role = (m.get("role") or "").strip().lower()
+        label = "Você" if role == "user" else ("Assistente" if role == "assistant" else "Sistema")
+        paras.append(w_p(f"{label}:", bold=True))
+        content = (m.get("content") or "").replace("\r\n", "\n")
+        for line in content.split("\n"):
+            paras.append(w_p(line))
+        paras.append(w_p(""))
+
+    document_xml = (
+        """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"""
+        """<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"""
+        """<w:body>"""
+        + "".join(paras)
+        + """<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1701" w:right="1134" w:bottom="1134" w:left="1701"/></w:sectPr>"""
+        + """</w:body></w:document>"""
+    )
+    return _docx_minimal_package(document_xml=document_xml, title=title)
+
+
+def _pdf_sanitize(text: str) -> str:
+    # fpdf (v1.x) is latin-1 oriented; normalize common punctuation outside latin-1.
+    s = (text or "")
+    s = s.replace("–", "-").replace("—", "-").replace("“", "\"").replace("”", "\"").replace("’", "'").replace("…", "...")
+    # ensure only latin-1 characters remain
+    return s.encode("latin-1", errors="replace").decode("latin-1", errors="replace")
+
+
+def render_conversation_pdf_bytes_fallback(conv: Dict[str, Any]) -> bytes:
+    """
+    Pure-Python PDF export using fpdf (already in requirements). ABNT-ish margins, simple layout.
+    """
+    from fpdf import FPDF
+
+    title = _conversation_title(conv)
+    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    sid = str(conv.get("id") or "")
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=20)
+    # ABNT-ish margins: left 30mm, top 30mm, right 20mm
+    pdf.set_margins(30, 30, 20)
+    pdf.add_page()
+    pdf.set_font("Times", "B", 14)
+    pdf.multi_cell(0, 8, _pdf_sanitize(f"Conversa - {title}"), align="C")
+    pdf.ln(2)
+    pdf.set_font("Times", "", 12)
+    pdf.multi_cell(0, 7, _pdf_sanitize(f"Data/hora de exportação: {exported_at}"))
+    if sid:
+        pdf.multi_cell(0, 7, _pdf_sanitize(f"Sessão: {sid}"))
+    pdf.ln(2)
+
+    for m in conv.get("messages") or []:
+        role = (m.get("role") or "").strip().lower()
+        label = "Você" if role == "user" else ("Assistente" if role == "assistant" else "Sistema")
+        pdf.ln(2)
+        pdf.set_font("Times", "B", 12)
+        pdf.multi_cell(0, 7, _pdf_sanitize(f"{label}:"))
+        pdf.set_font("Times", "", 12)
+        content = (m.get("content") or "").replace("\r\n", "\n")
+        pdf.multi_cell(0, 7, _pdf_sanitize(content))
+        pdf.ln(1)
+
+    # fpdf v1 returns a latin-1 str for dest='S'
+    out = pdf.output(dest="S")
+    if isinstance(out, bytes):
+        return out
+    return str(out).encode("latin-1", errors="replace")

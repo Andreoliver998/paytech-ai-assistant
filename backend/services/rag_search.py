@@ -44,12 +44,12 @@ def _load_chunk_meta(db: Session, chunk_id: int) -> Dict[str, Any]:
         return {}
 
 
-def rag_search_downloads(db: Session, query: str, top_k: int = 6) -> List[Dict[str, Any]]:
+def rag_search_downloads(db: Session, tenant_id: str, query: str, top_k: int = 6) -> List[Dict[str, Any]]:
     """
     Retorna itens auditáveis (docId + snippet + metadados).
     Usa search_downloads (embeddings/keyword) e enriquece com metadados persistidos.
     """
-    items = search_downloads(db, query, top_k)
+    items = search_downloads(db, tenant_id, query, top_k)
     out: List[Dict[str, Any]] = []
 
     # search_downloads returns "text" which is the chunk text stored.
@@ -64,7 +64,11 @@ def rag_search_downloads(db: Session, query: str, top_k: int = 6) -> List[Dict[s
         try:
             row = (
                 db.query(DownloadChunkDB)
-                .filter(DownloadChunkDB.file_id == doc_id, DownloadChunkDB.text == text)
+                .filter(
+                    DownloadChunkDB.file_id == doc_id,
+                    DownloadChunkDB.tenant_id == tenant_id,
+                    DownloadChunkDB.text == text,
+                )
                 .order_by(DownloadChunkDB.id.desc())
                 .first()
             )

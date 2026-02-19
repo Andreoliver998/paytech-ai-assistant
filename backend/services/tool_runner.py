@@ -25,6 +25,7 @@ def _ensure_dir(p: Path) -> None:
 def run_tools(
     *,
     db: Session,
+    tenant_id: str,
     plan: Dict[str, Any],
     exports_dir: Path,
     conversation: Dict[str, Any],
@@ -34,7 +35,7 @@ def run_tools(
 
     if plan.get("needs_rag"):
         q = str(plan.get("query") or "").strip()
-        sources = rag_search_downloads(db, q, top_k=6)
+        sources = rag_search_downloads(db, tenant_id, q, top_k=6)
 
     needs_export = str(plan.get("needs_export") or "none").lower()
     if needs_export and needs_export != "none":

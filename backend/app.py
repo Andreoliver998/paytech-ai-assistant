@@ -20,9 +20,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from .db import Base, engine, get_db
-from .models import DownloadChunkDB, DownloadFileDB, FileDB, KBChunkDB, MessageDB, SessionDB
+from .db import get_db, SessionLocal, bootstrap_database
+from .models import DownloadChunkDB, DownloadFileDB, FileDB, KBChunkDB, MembershipDB, MessageDB, SessionDB, TenantDB, UserDB
 from .services.openai_service import gerar_resposta, gerar_resposta_stream, get_client
+from .services.auth_service import AuthContext, authenticate_user, create_access_token, get_current_user, maybe_seed_demo, register_user
 from .services.downloads_service import list_downloads, search_downloads
 from .services.memory_service import get_preferences, upsert_preferences
 from .services.title_service import generate_conversation_title
@@ -37,6 +38,15 @@ from .services.rag_service import (
     extract_xlsx_text,
     index_file_and_save,
     retrieve_context,
+    retrieve_context_lexical,
+)
+from .services.precision_service import (
+    compute_csv_filter,
+    compute_on_text,
+    compute_table_stats,
+    load_full_text_for_download,
+    load_full_text_for_kb_file,
+    find_file_by_hint,
 )
 from .settings import settings, validate_openai_settings, openai_settings_hint, ENV_FILE_USED
 from .utils.files import DATA_DIR, UPLOADS_DIR, KB_FILE
@@ -65,6 +75,12 @@ _startup_logger = logging.getLogger("paytechai.startup")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.log_config_summary(_startup_logger)
+    try:
+        bootstrap_database()
+        with SessionLocal() as db:
+            maybe_seed_demo(db)
+    except Exception as e:
+        _startup_logger.warning("Falha ao bootstrap de banco/auth: %s", str(e))
     hint = openai_settings_hint(settings)
     if hint:
         if (settings.ENV or "").strip().lower() == "dev":
@@ -110,15 +126,9 @@ app.add_middleware(
 )
 
 
-# =========================================================
-# DB init (compatível com sua lógica; em prod use migrations)
-# =========================================================
-if settings.ENV.lower() == "dev":
-    Base.metadata.create_all(bind=engine)
-
 # Routers
 app.include_router(downloads_router)
-app.include_router(export_router)
+app.include_router(export_router, dependencies=[Depends(get_current_user)])
 
 
 # =========================================================
@@ -133,6 +143,9 @@ class ChatRequest(BaseModel):
     response_mode: Optional[str] = None
     use_downloads: Optional[bool] = None
     downloads_top_k: Optional[int] = None
+    show_sources: Optional[bool] = False
+    precision: Optional[bool] = True
+    file_id: Optional[str] = None
 
 
 class SummarizeRequest(BaseModel):
@@ -160,15 +173,35 @@ class TitleGenerateRequest(BaseModel):
     first_assistant: str
 
 
+class AuthLoginRequest(BaseModel):
+    email: str
+    password: str
+    tenant: Optional[str] = None
+
+
+class AuthRegisterRequest(BaseModel):
+    tenant_name: str
+    email: str
+    password: str
+
+
 # =========================================================
 # Helpers (DB sessions)
 # =========================================================
-def _ensure_session(db: Session, session_id: str, title: Optional[str] = None) -> SessionDB:
-    s = db.get(SessionDB, session_id)
+def _ensure_session(
+    db: Session,
+    tenant_id: str,
+    user_id: str,
+    session_id: str,
+    title: Optional[str] = None,
+) -> SessionDB:
+    s = db.query(SessionDB).filter(SessionDB.id == session_id, SessionDB.tenant_id == tenant_id).first()
     now = datetime.now()
     if not s:
         s = SessionDB(
             id=session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
             title=(title or "Conversa").strip() or "Conversa",
             createdAt=now,
             updatedAt=now,
@@ -186,13 +219,13 @@ def _ensure_session(db: Session, session_id: str, title: Optional[str] = None) -
     return s
 
 
-def _persist_message(db: Session, session_id: str, role: str, content: str) -> None:
+def _persist_message(db: Session, tenant_id: str, session_id: str, role: str, content: str) -> None:
     role = (role or "").strip()
     content = (content or "").strip()
     if role not in ("system", "user", "assistant") or not content:
         return
-    db.add(MessageDB(session_id=session_id, role=role, content=content))
-    s = db.get(SessionDB, session_id)
+    db.add(MessageDB(session_id=session_id, tenant_id=tenant_id, role=role, content=content))
+    s = db.query(SessionDB).filter(SessionDB.id == session_id, SessionDB.tenant_id == tenant_id).first()
     if s:
         s.updatedAt = datetime.now()
     db.commit()
@@ -386,6 +419,68 @@ def api_health():
     return health()
 
 
+@app.post("/auth/login")
+def auth_login(payload: AuthLoginRequest, db: Session = Depends(get_db)):
+    email = (payload.email or "").strip().lower()
+    password = payload.password or ""
+    tenant_hint = (payload.tenant or "").strip()
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="email e password são obrigatórios.")
+
+    auth = authenticate_user(db, email, password, tenant_hint or None)
+    if not auth:
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
+    user, tenant, membership = auth
+
+    try:
+        token = create_access_token(
+            user_id=user.id,
+            tenant_id=tenant.id,
+            role=(membership.role or "MEMBER").upper(),
+            email=user.email,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "ok": True,
+        "token": token,
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user.id, "email": user.email, "role": (membership.role or "MEMBER").upper()},
+        "tenant": {"id": tenant.id, "name": tenant.name},
+    }
+
+
+@app.post("/auth/register")
+def auth_register(payload: AuthRegisterRequest, db: Session = Depends(get_db)):
+    try:
+        tenant, user, membership = register_user(
+            db=db,
+            tenant_name=payload.tenant_name,
+            email=payload.email,
+            password=payload.password,
+        )
+        token = create_access_token(
+            user_id=user.id,
+            tenant_id=tenant.id,
+            role=(membership.role or "OWNER").upper(),
+            email=user.email,
+        )
+        return {
+            "ok": True,
+            "token": token,
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {"id": user.id, "email": user.email, "role": (membership.role or "OWNER").upper()},
+            "tenant": {"id": tenant.id, "name": tenant.name},
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/config-check")
 def config_check():
     return {
@@ -484,8 +579,16 @@ def debug_stream():
 # Sessões (DB) — usado pelo frontend
 # =========================================================
 @app.get("/sessions")
-def sessions_list(db: Session = Depends(get_db)):
-    rows = db.query(SessionDB).order_by(SessionDB.updatedAt.desc()).all()
+def sessions_list(
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    rows = (
+        db.query(SessionDB)
+        .filter(SessionDB.tenant_id == current.tenant_id)
+        .order_by(SessionDB.updatedAt.desc())
+        .all()
+    )
     out = []
     for s in rows:
         out.append(
@@ -500,12 +603,18 @@ def sessions_list(db: Session = Depends(get_db)):
 
 
 @app.post("/sessions")
-def sessions_create(payload: SessionCreateRequest, db: Session = Depends(get_db)):
+def sessions_create(
+    payload: SessionCreateRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     sid = str(uuid.uuid4())
     now = datetime.now()
 
     s = SessionDB(
         id=sid,
+        tenant_id=current.tenant_id,
+        user_id=current.user_id,
         title=(payload.title or "Nova conversa").strip() or "Nova conversa",
         createdAt=now,
         updatedAt=now,
@@ -525,12 +634,21 @@ def sessions_create(payload: SessionCreateRequest, db: Session = Depends(get_db)
 
 
 @app.get("/sessions/{session_id}")
-def sessions_get(session_id: str, db: Session = Depends(get_db)):
-    s = db.get(SessionDB, session_id)
+def sessions_get(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    s = db.query(SessionDB).filter(SessionDB.id == session_id, SessionDB.tenant_id == current.tenant_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Sessão não encontrada.")
 
-    msgs = db.query(MessageDB).filter(MessageDB.session_id == session_id).order_by(MessageDB.id.asc()).all()
+    msgs = (
+        db.query(MessageDB)
+        .filter(MessageDB.session_id == session_id, MessageDB.tenant_id == current.tenant_id)
+        .order_by(MessageDB.id.asc())
+        .all()
+    )
     messages = [{"role": m.role, "content": m.content} for m in msgs]
 
     return {
@@ -545,16 +663,23 @@ def sessions_get(session_id: str, db: Session = Depends(get_db)):
 
 
 @app.put("/sessions/{session_id}")
-def sessions_put(session_id: str, payload: SessionModel, db: Session = Depends(get_db)):
+def sessions_put(
+    session_id: str,
+    payload: SessionModel,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     if payload.id != session_id:
         raise HTTPException(status_code=400, detail="ID da URL diferente do payload.")
 
-    s = db.get(SessionDB, session_id)
+    s = db.query(SessionDB).filter(SessionDB.id == session_id, SessionDB.tenant_id == current.tenant_id).first()
     now = datetime.now()
 
     if not s:
         s = SessionDB(
             id=session_id,
+            tenant_id=current.tenant_id,
+            user_id=current.user_id,
             title=(payload.title or "Conversa").strip() or "Conversa",
             createdAt=datetime.fromisoformat(payload.createdAt) if payload.createdAt else now,
             updatedAt=now,
@@ -566,20 +691,24 @@ def sessions_put(session_id: str, payload: SessionModel, db: Session = Depends(g
         s.updatedAt = now
         db.commit()
 
-    db.query(MessageDB).filter(MessageDB.session_id == session_id).delete()
+    db.query(MessageDB).filter(MessageDB.session_id == session_id, MessageDB.tenant_id == current.tenant_id).delete()
     for m in payload.messages or []:
         role = (m.get("role") or "").strip()
         content = (m.get("content") or "").strip()
         if role in ("system", "user", "assistant") and content:
-            db.add(MessageDB(session_id=session_id, role=role, content=content))
+            db.add(MessageDB(session_id=session_id, tenant_id=current.tenant_id, role=role, content=content))
     db.commit()
 
-    return sessions_get(session_id, db)
+    return sessions_get(session_id, db, current)
 
 
 @app.delete("/sessions/{session_id}")
-def sessions_delete(session_id: str, db: Session = Depends(get_db)):
-    s = db.get(SessionDB, session_id)
+def sessions_delete(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    s = db.query(SessionDB).filter(SessionDB.id == session_id, SessionDB.tenant_id == current.tenant_id).first()
     if not s:
         raise HTTPException(status_code=404, detail="Sessão não encontrada.")
     db.delete(s)
@@ -588,7 +717,10 @@ def sessions_delete(session_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/exports/{name}")
-def exports_get(name: str):
+def exports_get(
+    name: str,
+    current: AuthContext = Depends(get_current_user),
+):
     safe = (name or "").strip()
     if not safe or "/" in safe or "\\" in safe or ".." in safe:
         raise HTTPException(status_code=400, detail="Nome inválido.")
@@ -610,13 +742,22 @@ class MemoryPatchRequest(BaseModel):
 
 
 @app.get("/memory/{user_id}")
-def memory_get(user_id: str, db: Session = Depends(get_db)):
+def memory_get(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     prefs = get_preferences(db, user_id)
     return {"user_id": (user_id or "").strip(), "preferences": prefs}
 
 
 @app.put("/memory/{user_id}")
-def memory_put(user_id: str, payload: MemoryPatchRequest, db: Session = Depends(get_db)):
+def memory_put(
+    user_id: str,
+    payload: MemoryPatchRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     prefs = upsert_preferences(db, user_id, payload.preferences or {})
     return {"user_id": (user_id or "").strip(), "preferences": prefs}
 
@@ -625,15 +766,18 @@ def memory_put(user_id: str, payload: MemoryPatchRequest, db: Session = Depends(
 # Auto Title
 # =========================================================
 @app.post("/titles/generate")
-def titles_generate(payload: TitleGenerateRequest, db: Session = Depends(get_db)):
+def titles_generate(
+    payload: TitleGenerateRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     title = generate_conversation_title(
         first_user=payload.first_user,
         first_assistant=payload.first_assistant,
         model=settings.OPENAI_MODEL,
     )
     # persist in memory (best-effort) so the platform "remembers" preferred style signals
-    if payload.user_id:
-        upsert_preferences(db, payload.user_id, {"last_title": title})
+    upsert_preferences(db, current.user_id, {"last_title": title})
     return {"title": title}
 
 
@@ -641,7 +785,11 @@ def titles_generate(payload: TitleGenerateRequest, db: Session = Depends(get_db)
 # Upload (salva em disco + DB + kb_store.json)
 # =========================================================
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_file(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     filename = file.filename or "arquivo"
     ext = (Path(filename).suffix or "").lower().strip(".")
     if ext not in ("pdf", "csv", "xlsx"):
@@ -670,6 +818,7 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
     try:
         added = index_file_and_save(
             db=db,
+            tenant_id=current.tenant_id,
             file_id=file_id,
             filename=filename,
             ext=ext,
@@ -683,20 +832,28 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
 
 
 @app.get("/files")
-def list_files():
-    files = []
-    for p in UPLOADS_DIR.glob("*"):
-        if p.is_file():
-            files.append({"name": p.name, "size": p.stat().st_size})
-    return {"files": files}
+def list_files(
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    rows = db.query(FileDB).filter(FileDB.tenant_id == current.tenant_id).order_by(FileDB.createdAt.desc()).all()
+    return {"files": [{"name": r.filename, "size": int(r.size or 0), "file_id": r.file_id} for r in rows]}
 
 
 # =========================================================
 # Files (DB): lista + download do arquivo original
 # =========================================================
 @app.get("/files/db")
-def list_files_db(db: Session = Depends(get_db)):
-    rows = db.query(FileDB).order_by(FileDB.createdAt.desc()).all()
+def list_files_db(
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    rows = (
+        db.query(FileDB)
+        .filter(FileDB.tenant_id == current.tenant_id)
+        .order_by(FileDB.createdAt.desc())
+        .all()
+    )
     return {
         "files": [
             {
@@ -712,8 +869,12 @@ def list_files_db(db: Session = Depends(get_db)):
 
 
 @app.get("/files/db/{file_id}/download")
-def download_file_db(file_id: str, db: Session = Depends(get_db)):
-    r = db.get(FileDB, file_id)
+def download_file_db(
+    file_id: str,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    r = db.query(FileDB).filter(FileDB.file_id == file_id, FileDB.tenant_id == current.tenant_id).first()
     if not r:
         raise HTTPException(status_code=404, detail="Arquivo não encontrado no banco.")
 
@@ -730,12 +891,21 @@ def download_file_db(file_id: str, db: Session = Depends(get_db)):
 # KB endpoints (para o painel “Documentos” do frontend)
 # =========================================================
 @app.get("/kb/stats")
-def kb_stats(db: Session = Depends(get_db)):
-    files = db.query(FileDB).order_by(FileDB.createdAt.desc()).all()
+def kb_stats(
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    files = (
+        db.query(FileDB)
+        .filter(FileDB.tenant_id == current.tenant_id)
+        .order_by(FileDB.createdAt.desc())
+        .all()
+    )
 
     # agrega chunks por arquivo
     chunk_counts = dict(
         db.query(KBChunkDB.file_id, func.count(KBChunkDB.id))
+        .filter(KBChunkDB.tenant_id == current.tenant_id)
         .group_by(KBChunkDB.file_id)
         .all()
     )
@@ -744,11 +914,12 @@ def kb_stats(db: Session = Depends(get_db)):
     # (para SQLite, length(text) funciona; para outros DBs também costuma funcionar)
     chars_counts = dict(
         db.query(KBChunkDB.file_id, func.coalesce(func.sum(func.length(KBChunkDB.text)), 0))
+        .filter(KBChunkDB.tenant_id == current.tenant_id)
         .group_by(KBChunkDB.file_id)
         .all()
     )
 
-    chunks_total = db.query(KBChunkDB).count()
+    chunks_total = db.query(KBChunkDB).filter(KBChunkDB.tenant_id == current.tenant_id).count()
 
     return {
         "files": [
@@ -769,10 +940,15 @@ def kb_stats(db: Session = Depends(get_db)):
 
 
 @app.get("/kb/file/{file_id}/preview")
-def kb_preview(file_id: str, limit: int = settings.KB_PREVIEW_LIMIT, db: Session = Depends(get_db)):
+def kb_preview(
+    file_id: str,
+    limit: int = settings.KB_PREVIEW_LIMIT,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     rows = (
         db.query(KBChunkDB)
-        .filter(KBChunkDB.file_id == file_id)
+        .filter(KBChunkDB.file_id == file_id, KBChunkDB.tenant_id == current.tenant_id)
         .order_by(KBChunkDB.id.asc())
         .all()
     )
@@ -799,7 +975,15 @@ def kb_preview(file_id: str, limit: int = settings.KB_PREVIEW_LIMIT, db: Session
 # =========================================================
 # KB / Summarização
 # =========================================================
-def _kb_summarize_impl(*, mode: str, file_id: Optional[str], style: str, max_sources: int, db: Session) -> Dict[str, Any]:
+def _kb_summarize_impl(
+    *,
+    tenant_id: str,
+    mode: str,
+    file_id: Optional[str],
+    style: str,
+    max_sources: int,
+    db: Session,
+) -> Dict[str, Any]:
     mode = (mode or "all").strip().lower()
     style = (style or "completo").strip().lower()
     max_sources = max(1, int(max_sources or 12))
@@ -809,13 +993,19 @@ def _kb_summarize_impl(*, mode: str, file_id: Optional[str], style: str, max_sou
             raise HTTPException(status_code=400, detail="file_id é obrigatório quando mode='file'.")
         rows = (
             db.query(KBChunkDB)
-            .filter(KBChunkDB.file_id == file_id)
+            .filter(KBChunkDB.file_id == file_id, KBChunkDB.tenant_id == tenant_id)
             .order_by(KBChunkDB.id.asc())
             .limit(max_sources)
             .all()
         )
     else:
-        rows = db.query(KBChunkDB).order_by(KBChunkDB.id.desc()).limit(max_sources).all()
+        rows = (
+            db.query(KBChunkDB)
+            .filter(KBChunkDB.tenant_id == tenant_id)
+            .order_by(KBChunkDB.id.desc())
+            .limit(max_sources)
+            .all()
+        )
 
     chunks = [{"filename": r.filename, "text": r.text, "score": 1.0} for r in rows]
 
@@ -840,8 +1030,13 @@ Cite as fontes por nome do arquivo."""
 
 
 @app.post("/kb/summarize")
-def kb_summarize(payload: SummarizeRequest, db: Session = Depends(get_db)):
+def kb_summarize(
+    payload: SummarizeRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     return _kb_summarize_impl(
+        tenant_id=current.tenant_id,
         mode=payload.mode or "all",
         file_id=payload.file_id,
         style=payload.style or "completo",
@@ -858,15 +1053,27 @@ def kb_summarize_get(
     style: str = Query("completo"),
     max_sources: int = Query(12),
     db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
 ):
     # mantém a lógica (mesmo impl), só muda o "contrato" para GET via querystring
-    return _kb_summarize_impl(mode=mode, file_id=file_id, style=style, max_sources=max_sources, db=db)
+    return _kb_summarize_impl(
+        tenant_id=current.tenant_id,
+        mode=mode,
+        file_id=file_id,
+        style=style,
+        max_sources=max_sources,
+        db=db,
+    )
 
 
 # ---- Aliases de compatibilidade para evitar 404 por mudança de rota/prefixo ----
 @app.post("/api/kb/summarize")
-def kb_summarize_api(payload: SummarizeRequest, db: Session = Depends(get_db)):
-    return kb_summarize(payload, db)
+def kb_summarize_api(
+    payload: SummarizeRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    return kb_summarize(payload, db, current)
 
 
 @app.get("/api/kb/summarize")
@@ -876,8 +1083,16 @@ def kb_summarize_api_get(
     style: str = Query("completo"),
     max_sources: int = Query(12),
     db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
 ):
-    return kb_summarize_get(mode=mode, file_id=file_id, style=style, max_sources=max_sources, db=db)
+    return kb_summarize_get(
+        mode=mode,
+        file_id=file_id,
+        style=style,
+        max_sources=max_sources,
+        db=db,
+        current=current,
+    )
 
 
 class DocumentSummarizeRequest(BaseModel):
@@ -886,8 +1101,14 @@ class DocumentSummarizeRequest(BaseModel):
 
 
 @app.post("/documents/{doc_id}/summarize")
-def documents_summarize(doc_id: str, payload: DocumentSummarizeRequest, db: Session = Depends(get_db)):
+def documents_summarize(
+    doc_id: str,
+    payload: DocumentSummarizeRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     return _kb_summarize_impl(
+        tenant_id=current.tenant_id,
         mode="file",
         file_id=doc_id,
         style=payload.style or "completo",
@@ -897,15 +1118,24 @@ def documents_summarize(doc_id: str, payload: DocumentSummarizeRequest, db: Sess
 
 
 @app.post("/api/documents/{doc_id}/summarize")
-def documents_summarize_api(doc_id: str, payload: DocumentSummarizeRequest, db: Session = Depends(get_db)):
-    return documents_summarize(doc_id, payload, db)
+def documents_summarize_api(
+    doc_id: str,
+    payload: DocumentSummarizeRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    return documents_summarize(doc_id, payload, db, current)
 
 
 # =========================================================
 # Chat (NORMAL)
 # =========================================================
 @app.post("/chat")
-def chat(payload: ChatRequest, db: Session = Depends(get_db)):
+def chat(
+    payload: ChatRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     hint = openai_settings_hint(settings)
     if hint:
         raise HTTPException(status_code=503, detail=hint)
@@ -919,9 +1149,30 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 last_user = m["content"]
                 break
 
+        precision_on = payload.precision is not False
+
+        if precision_on and last_user:
+            show_sources = bool(payload.show_sources) or _did_user_request_sources(last_user)
+            intent = detect_deterministic_intent(last_user)
+            if intent:
+                det = _deterministic_reply_from_intent(
+                    db=db,
+                    current=current,
+                    intent=intent,
+                    user_text=last_user,
+                    explicit_file_id=(payload.file_id or "").strip(),
+                )
+                if det:
+                    reply_text, det_debug, det_sources = det
+                    return {
+                        "reply": reply_text,
+                        "sources": det_sources if show_sources else [],
+                        "debug": {**det_debug},
+                    }
+
         # Fast path: list documents without an LLM roundtrip (reduz latência e evita respostas inúteis).
         if _is_list_documents_request(last_user):
-            files = list_downloads(db)
+            files = list_downloads(db, current.tenant_id)
             return {
                 "reply": _format_downloads_list_markdown(files),
                 "sources": [],
@@ -939,27 +1190,28 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                 },
             }
 
-        prefs = get_preferences(db, payload.user_id or "") if payload.user_id else {}
+        effective_user_id = current.user_id
+        prefs = get_preferences(db, effective_user_id) if effective_user_id else {}
         mode = _normalize_response_mode(payload.response_mode or (prefs.get("response_mode") if isinstance(prefs, dict) else None))
 
         use_downloads_pref = bool(prefs.get("use_downloads")) if isinstance(prefs, dict) and prefs.get("use_downloads") in (True, False) else False
         use_downloads = _resolve_use_downloads(payload.use_downloads, use_downloads_pref, last_user)
         downloads_top_k = _normalize_downloads_top_k(payload.downloads_top_k)
         use_kb = _should_use_kb(last_user)
-        show_sources = _did_user_request_sources(last_user)
+        show_sources = bool(payload.show_sources) or _did_user_request_sources(last_user)
 
         merged_prefs = dict(prefs) if isinstance(prefs, dict) else {}
         merged_prefs["response_mode"] = mode
         if payload.use_downloads in (True, False):
             merged_prefs["use_downloads"] = bool(payload.use_downloads)
 
-        if payload.user_id:
+        if effective_user_id:
             patch: Dict[str, Any] = {"response_mode": mode}
             if payload.use_downloads in (True, False):
                 patch["use_downloads"] = bool(payload.use_downloads)
             upsert_preferences(
                 db,
-                payload.user_id,
+                effective_user_id,
                 patch,
             )
 
@@ -986,16 +1238,38 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
                     pass
                 return []
 
-        if use_downloads:
+        if use_kb:
+            # Document questions: expand context coverage (lexical + semantic).
+            tdoc = (last_user or "").lower()
+            doc_focus = any(x in tdoc for x in ["fatura", "venc", "cart", "cpf", "valor", "linha", "coluna", "data", "parcel"])
+            sem_k = max(12, int(settings.RAG_TOP_K or 6))
+            lex_k = 8
+            if doc_focus:
+                sem_k = max(16, sem_k)
+                lex_k = max(12, lex_k)
+
+            sem = _rag_with_timeout(lambda: retrieve_context(db, current.tenant_id, last_user or "", top_k=sem_k))
+            lex = _rag_with_timeout(lambda: retrieve_context_lexical(db, current.tenant_id, last_user or "", top_k=lex_k))
+
+            seen_ids = set()
+            merged: List[Dict[str, Any]] = []
+            for it in (lex or []) + (sem or []):
+                cid = it.get("chunk_id")
+                key = f"c:{cid}" if cid is not None else f"t:{it.get('file_id')}:{hash(it.get('text') or '')}"
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                merged.append(it)
+            context_chunks = merged[: max(12, int(sem_k))]
+        elif use_downloads:
             context_chunks = _rag_with_timeout(
                 lambda: search_downloads(
                     db,
+                    current.tenant_id,
                     last_user or "",
                     top_k=downloads_top_k,
                 )
             )
-        elif use_kb:
-            context_chunks = _rag_with_timeout(lambda: retrieve_context(db, last_user or "", top_k=settings.RAG_TOP_K))
 
         if context_chunks:
             system_prompt = build_rag_system_prompt(context_chunks)
@@ -1008,12 +1282,22 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
         )
 
         if payload.session_id:
-            _ensure_session(db, payload.session_id, title=payload.title)
+            _ensure_session(
+                db,
+                current.tenant_id,
+                current.user_id,
+                payload.session_id,
+                title=payload.title,
+            )
             if last_user:
-                _persist_message(db, payload.session_id, "user", last_user)
-            _persist_message(db, payload.session_id, "assistant", reply)
+                _persist_message(db, current.tenant_id, payload.session_id, "user", last_user)
+            _persist_message(db, current.tenant_id, payload.session_id, "assistant", reply)
 
-        sources = []
+        sources = (
+            [{"ref": f"Fonte {i+1}", "filename": c.get("filename")} for i, c in enumerate(context_chunks)]
+            if show_sources
+            else []
+        )
 
         return {
             "reply": reply,
@@ -1044,7 +1328,11 @@ def chat(payload: ChatRequest, db: Session = Depends(get_db)):
 # Chat (STREAM) — SSE (POST) com eventos meta/delta/citations/done/error
 # =========================================================
 @app.post("/chat/stream")
-def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
+def chat_stream(
+    payload: ChatRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
     hint = openai_settings_hint(settings)
     if hint:
         raise HTTPException(status_code=503, detail=hint)
@@ -1083,12 +1371,32 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
                 if m["role"] == "user":
                     last_user = m["content"]
                     break
-            show_sources = _did_user_request_sources(last_user)
+            show_sources = bool(payload.show_sources) or _did_user_request_sources(last_user)
+            precision_on = payload.precision is not False
+
+            if precision_on and last_user:
+                intent = detect_deterministic_intent(last_user)
+                if intent:
+                    det = _deterministic_reply_from_intent(
+                        db=db,
+                        current=current,
+                        intent=intent,
+                        user_text=last_user,
+                        explicit_file_id=(payload.file_id or "").strip(),
+                    )
+                    if det:
+                        reply_text, _det_debug, det_sources = det
+                        yield _sse("status", {"phase": "answer"})
+                        yield _sse("delta", {"text": reply_text})
+                        if show_sources and det_sources:
+                            yield _sse("sources", det_sources)
+                        yield _sse("status", {"phase": "done", "message_id": message_id, "deterministic": True})
+                        return
 
             # Fast path: list documents (stream-friendly; avoids planner/tools overhead).
             if _is_list_documents_request(last_user):
                 yield _sse("status", {"phase": "answer"})
-                files = list_downloads(db)
+                files = list_downloads(db, current.tenant_id)
                 yield _sse("delta", {"text": _format_downloads_list_markdown(files)})
                 yield _sse(
                     "status",
@@ -1102,7 +1410,8 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
                 return
 
             # structured memory + thread meta
-            user_prefs = get_user_prefs(db, payload.user_id or "") if payload.user_id else {}
+            effective_user_id = current.user_id
+            user_prefs = get_user_prefs(db, effective_user_id) if effective_user_id else {}
             if payload.thread_id and payload.title:
                 upsert_thread_meta(db, payload.thread_id, payload.title)
 
@@ -1160,11 +1469,11 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
                 plan["needs_rag"] = bool(pref_downloads)
 
             # persist high-signal prefs
-            if payload.user_id:
+            if effective_user_id:
                 try:
-                    upsert_user_pref(db, payload.user_id, "response_mode", plan.get("response_mode") or "")
+                    upsert_user_pref(db, effective_user_id, "response_mode", plan.get("response_mode") or "")
                     if explicit_downloads is not None:
-                        upsert_user_pref(db, payload.user_id, "use_downloads", "true" if explicit_downloads else "false")
+                        upsert_user_pref(db, effective_user_id, "use_downloads", "true" if explicit_downloads else "false")
                 except Exception:
                     pass
 
@@ -1176,6 +1485,7 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
             def _call_tools():
                 return run_tools(
                     db=db,
+                    tenant_id=current.tenant_id,
                     plan=plan,
                     exports_dir=EXPORTS_DIR,
                     conversation={
@@ -1204,7 +1514,7 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
             artifacts = (tool_res.artifacts if tool_res else []) or []
 
             # Build prompt (memory recall + RAG evidence)
-            recall = recall_user_prefs(db, payload.user_id or "", last_user or "", top_k=4) if payload.user_id else []
+            recall = recall_user_prefs(db, effective_user_id, last_user or "", top_k=4) if effective_user_id else []
             recall_lines = [f"- {k}: {v}" for (k, v, _score) in recall if k and v]
             recall_block = "Memória relevante:\n" + "\n".join(recall_lines) if recall_lines else ""
 
@@ -1228,6 +1538,20 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
                 sys_msgs.append({"role": "system", "content": recall_block})
             sys_msgs.append({"role": "system", "content": _planner_mode_to_prompt(str(plan.get('response_mode') or 'normal'))})
             if evidence_block:
+                sys_msgs.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Você é um analisador técnico de documentos. Sua única fonte de verdade é o conteúdo em 'Evidências'.\n"
+                            "Regras:\n"
+                            "- Responda somente com base nas evidências.\n"
+                            "- Se não estiver explicitamente nas evidências, responda apenas: 'Essa informação não consta no documento analisado.'\n"
+                            "- Proibido sugerir verificar app/banco/outra fonte.\n"
+                            "- Proibido usar linguagem genérica (ex.: 'Recomendo consultar...').\n"
+                            "- Para valores/datas/números/parcelas: devolva exatamente como está no documento."
+                        ),
+                    }
+                )
                 sys_msgs.append({"role": "system", "content": evidence_block})
                 if plan.get("must_cite_sources"):
                     sys_msgs.append({"role": "system", "content": "Se usar evidências, inclua uma seção final 'Fontes' com os itens citados."})
@@ -1255,13 +1579,20 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
                     full = (full + suffix).strip()
 
             if payload.session_id:
-                _ensure_session(db, payload.session_id, title=payload.title)
+                _ensure_session(
+                    db,
+                    current.tenant_id,
+                    current.user_id,
+                    payload.session_id,
+                    title=payload.title,
+                )
                 if last_user:
-                    _persist_message(db, payload.session_id, "user", last_user)
+                    _persist_message(db, current.tenant_id, payload.session_id, "user", last_user)
                 if full:
-                    _persist_message(db, payload.session_id, "assistant", full)
+                    _persist_message(db, current.tenant_id, payload.session_id, "assistant", full)
 
-            # UX rule: never expose sources in chat streaming.
+            if show_sources and sources:
+                yield _sse("sources", sources)
             for a in artifacts:
                 yield _sse("artifact", a)
 
@@ -1282,3 +1613,345 @@ def chat_stream(payload: ChatRequest, db: Session = Depends(get_db)):
             "Connection": "keep-alive",
         },
     )
+
+class KBComputeRequest(BaseModel):
+    file_id: str
+    op: str
+    arg: Optional[str] = ""
+    flags: Dict[str, Any] = {}
+
+
+def user_requested_sources(text: Optional[str]) -> bool:
+    return _did_user_request_sources(text)
+
+
+def detect_deterministic_intent(text: str) -> Dict[str, Any] | None:
+    """
+    Returns:
+      { action: count|stats|extract|list, target: ..., file_hint?: str }
+    """
+    t = (text or "").strip()
+    low = t.lower()
+    if not low:
+        return None
+
+    # file hints
+    file_hint = ""
+    mfile = re.search(r"([\w\-\.\s]+?\.(pdf|csv|xlsx|txt))", t, flags=re.IGNORECASE)
+    if mfile:
+        file_hint = (mfile.group(1) or "").strip()
+    mid = re.search(r"\b([a-f0-9]{32})\b", low)
+    if mid and not file_hint:
+        file_hint = mid.group(1)
+
+    def out(action: str, target: str) -> Dict[str, Any]:
+        d: Dict[str, Any] = {"action": action, "target": target}
+        if file_hint:
+            d["file_hint"] = file_hint
+        return d
+
+    if re.search(r"\b(quantos?|quantas?|contar|contagem|total\b|total de|qual o total|n[uú]mero de|quantidade de)\b", low):
+        if "interroga" in low or "?" in low:
+            return out("count", "punctuation")
+        if "exclama" in low or "!" in low:
+            return out("count", "punctuation")
+        if "caracter" in low or "chars" in low:
+            return out("count", "chars")
+        if "palavr" in low:
+            return out("count", "words")
+        if "linhas" in low or "linha" in low:
+            return out("stats", "lines")
+        if "colunas" in low or "coluna" in low:
+            return out("stats", "columns")
+        if "alunos" in low or "aluno" in low or "pessoas" in low or "pessoa" in low:
+            return out("count", "records")
+        return out("count", "all")
+
+    if re.search(r"\b(linhas e colunas|quantas linhas|quantas colunas|colunas tem|linhas tem)\b", low):
+        return out("stats", "table")
+
+    if re.search(r"\b(valor exato|cpf exato|data exata|nome exato)\b", low):
+        return out("extract", "field")
+
+    if re.search(r"\b(liste todos|liste todas|listar todos|listar todas)\b", low):
+        return out("list", "all")
+
+    return None
+
+
+def _map_deterministic_to_compute(text: str) -> tuple[str, str, Dict[str, Any]] | None:
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if "interroga" in t and ("quantos" in t or "conte" in t):
+        return "count_char", "?", {}
+    if "exclama" in t and ("quantos" in t or "conte" in t):
+        return "count_char", "!", {}
+
+    m = re.search(r"quantos?\s+['\"]([^'\"]+)['\"]", t)
+    if m:
+        return "count_regex", m.group(1), {"case_insensitive": True}
+
+    # csv filter heuristic: "STATUS=Pago"
+    m2 = re.search(r"\b([a-zA-Z0-9_À-ÿ]+)\s*=\s*([a-zA-Z0-9_À-ÿ -]+)", text or "")
+    if m2 and ("csv" in t or "xlsx" in t or "planilha" in t or "coluna" in t or "filtr" in t):
+        col = str(m2.group(1)).strip()
+        val = str(m2.group(2)).strip()
+        return "csv_filter", json.dumps({"column": col, "value": val}, ensure_ascii=False), {"case_insensitive": True}
+
+    # generic regex count: "ocorrências de X"
+    m3 = re.search(r"ocorr[eê]ncias?\s+de\s+(.+)$", t)
+    if m3:
+        arg = (m3.group(1) or "").strip().strip(".")
+        if arg:
+            return "count_regex", arg, {"case_insensitive": True}
+    return None
+
+
+def _pick_best_file_id(*, lex: List[Dict[str, Any]], sem: List[Dict[str, Any]]) -> str:
+    """
+    Choose the most likely file_id from retrieval results without relying on raw score scales.
+    Uses rank-based aggregation to avoid lexical vs semantic score mismatch.
+    """
+    points: Dict[str, float] = {}
+
+    def add_ranked(lst: List[Dict[str, Any]], weight: float):
+        n = len(lst)
+        for idx, it in enumerate(lst):
+            fid = str(it.get("file_id") or "").strip()
+            if not fid:
+                continue
+            points[fid] = points.get(fid, 0.0) + (float(max(0, n - idx)) * float(weight))
+
+    add_ranked(lex or [], 1.0)
+    add_ranked(sem or [], 0.8)
+    if not points:
+        return ""
+    return sorted(points.items(), key=lambda kv: kv[1], reverse=True)[0][0]
+
+
+def _deterministic_reply_from_intent(
+    *,
+    db: Session,
+    current: AuthContext,
+    intent: Dict[str, Any],
+    user_text: str,
+    explicit_file_id: str,
+) -> tuple[str, Dict[str, Any], List[Dict[str, Any]]] | None:
+    action = str(intent.get("action") or "")
+    target = str(intent.get("target") or "")
+    file_hint = str(intent.get("file_hint") or "").strip()
+
+    chosen_id = (explicit_file_id or "").strip()
+    if not chosen_id and file_hint:
+        hit = find_file_by_hint(db, current.tenant_id, file_hint)
+        if hit:
+            chosen_id = hit[1]
+    if not chosen_id:
+        # pick best candidate via hybrid retrieval
+        sem = retrieve_context(db, current.tenant_id, user_text, top_k=10)
+        lex = retrieve_context_lexical(db, current.tenant_id, user_text, top_k=10)
+        chosen_id = str(_pick_best_file_id(lex=lex, sem=sem) or "").strip()
+    if not chosen_id:
+        return None
+
+    kb_file, full_text = load_full_text_for_kb_file(db, current.tenant_id, chosen_id)
+    dl_file = None
+    if not kb_file:
+        dl_file, full_text = load_full_text_for_download(db, current.tenant_id, chosen_id)
+    fobj = kb_file or dl_file
+    if not fobj:
+        return None
+
+    filename = str(getattr(fobj, "filename", "") or "arquivo")
+    ext = str(getattr(fobj, "ext", "") or "").lower()
+
+    debug = {"deterministic": True, "action": action, "target": target, "file_id": chosen_id, "filename": filename}
+    sources = [{"ref": "Fonte 1", "filename": filename, "file_id": chosen_id}]
+
+    # stats for tables
+    if action == "stats" or target in ("lines", "columns", "table"):
+        if ext in ("csv", "xlsx"):
+            rows = int(getattr(fobj, "rows", 0) or 0)
+            cols = int(getattr(fobj, "cols", 0) or 0)
+            try:
+                cols_list = json.loads(getattr(fobj, "columns_json", "") or "[]")
+                if not isinstance(cols_list, list):
+                    cols_list = []
+            except Exception:
+                cols_list = []
+            if not rows or not cols:
+                stats = compute_table_stats(stored_path=getattr(fobj, "stored_path", ""), ext=ext)
+                rows = int(stats.get("rows") or 0)
+                cols = int(stats.get("cols") or 0)
+                cols_list = list(stats.get("column_names") or [])
+                try:
+                    setattr(fobj, "rows", rows)
+                    setattr(fobj, "cols", cols)
+                    setattr(fobj, "columns_json", json.dumps([str(c) for c in cols_list], ensure_ascii=False))
+                    db.commit()
+                except Exception:
+                    pass
+            return (f"Linhas: {rows}\nColunas: {cols}\nColunas: {', '.join([str(c) for c in cols_list])}", debug, sources)
+        # non-table docs: lines only
+        lines = (full_text or "").splitlines()
+        return (f"Linhas: {len(lines)}", debug, sources)
+
+    if action == "count":
+        s = full_text or ""
+        if target == "punctuation":
+            q = s.count("?")
+            e = s.count("!")
+            d = s.count(".")
+            c = s.count(",")
+            # if asked specifically "?"
+            if "?" in user_text or "interroga" in user_text.lower():
+                return (str(q), debug, sources)
+            if "!" in user_text or "exclama" in user_text.lower():
+                return (str(e), debug, sources)
+            return (f"?: {q}\n!: {e}\n.: {d}\n,: {c}", debug, sources)
+        if target == "chars":
+            return (str(len(s)), debug, sources)
+        if target == "words":
+            words = re.findall(r"[\wÀ-ÿ]+", s, flags=re.UNICODE)
+            return (str(len(words)), debug, sources)
+        if target == "records":
+            if ext in ("csv", "xlsx"):
+                rows = int(getattr(fobj, "rows", 0) or 0)
+                if not rows:
+                    stats = compute_table_stats(stored_path=getattr(fobj, "stored_path", ""), ext=ext)
+                    rows = int(stats.get("rows") or 0)
+                    try:
+                        setattr(fobj, "rows", rows)
+                        db.commit()
+                    except Exception:
+                        pass
+                return (str(rows), debug, sources)
+            low = s.lower()
+            patterns = [
+                r"\baluno\s*:",
+                r"\bnome\s*:",
+                r"^\s*\d+\s*[-.)]\s+",
+            ]
+            counts = []
+            for p in patterns:
+                try:
+                    counts.append(len(re.findall(p, low, flags=re.IGNORECASE | re.MULTILINE)))
+                except Exception:
+                    pass
+            best = max(counts) if counts else 0
+            if best > 0:
+                return (str(best), debug, sources)
+            return (
+                "Não há um marcador consistente para contar automaticamente; posso contar por um padrão (ex.: 'Aluno:' ou 'Nome:') se você confirmar.",
+                debug,
+                sources,
+            )
+        # fallback: count occurrences of a quoted token if present
+        m = re.search(r"['\"]([^'\"]+)['\"]", user_text or "")
+        if m:
+            token = m.group(1)
+            r = compute_on_text(text=s, op="count_regex", arg=re.escape(token), flags={"case_insensitive": True})
+            return (str(r.result), debug, sources)
+        return (str(len(s)), debug, sources)
+
+    if action == "extract":
+        lowq = (user_text or "").lower()
+        s = full_text or ""
+        def _line_for_match(span_start: int, span_end: int) -> str:
+            if span_start < 0 or span_end < 0:
+                return ""
+            a = s.rfind("\n", 0, span_start)
+            b = s.find("\n", span_end)
+            if a < 0:
+                a = 0
+            else:
+                a += 1
+            if b < 0:
+                b = len(s)
+            return (s[a:b] or "").strip()
+        if "cpf" in lowq:
+            m = re.search(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b|\b\d{11}\b", s)
+            if m:
+                line = _line_for_match(m.start(), m.end())
+                return (line or m.group(0), debug, sources)
+        if "data" in lowq or "venc" in lowq:
+            m = re.search(r"\b\d{2}/\d{2}/\d{4}\b|\b\d{4}-\d{2}-\d{2}\b", s)
+            if m:
+                line = _line_for_match(m.start(), m.end())
+                return (line or m.group(0), debug, sources)
+        if "valor" in lowq or "r$" in lowq:
+            m = re.search(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}", s)
+            if m:
+                line = _line_for_match(m.start(), m.end())
+                return (line or m.group(0), debug, sources)
+        return ("Essa informação não consta no documento analisado.", debug, sources)
+
+    if action == "list":
+        # Minimal: list lines that contain a term after "liste todos os ..."
+        m = re.search(r"liste (?:todos|todas) os?\s+(.+)$", (user_text or "").strip(), flags=re.IGNORECASE)
+        term = (m.group(1) if m else "").strip()
+        if term:
+            r = compute_on_text(text=full_text or "", op="extract_lines", arg=term, flags={"case_insensitive": True, "max_lines": 200})
+            lines = r.result if isinstance(r.result, list) else []
+            if lines:
+                return ("\n".join([str(x) for x in lines]), debug, sources)
+        return ("Essa informação não consta no documento analisado.", debug, sources)
+
+    return None
+
+
+@app.post("/kb/compute")
+def kb_compute(
+    payload: KBComputeRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    fid = (payload.file_id or "").strip()
+    op = (payload.op or "").strip()
+    arg = payload.arg or ""
+    flags = payload.flags or {}
+
+    # Try KB file first, then Downloads library (ids can overlap in theory; we prefer KB).
+    kb_file, text = load_full_text_for_kb_file(db, current.tenant_id, fid)
+    if kb_file:
+        if op == "csv_filter":
+            r = compute_csv_filter(stored_path=kb_file.stored_path or "", ext=kb_file.ext or "", arg=arg, flags=flags)
+        else:
+            r = compute_on_text(text=text, op=op, arg=arg, flags=flags)
+        if not r.ok:
+            raise HTTPException(status_code=400, detail=r.meta.get("error") or "compute falhou")
+        return {
+            "ok": True,
+            "file": {"id": kb_file.file_id, "filename": kb_file.filename, "ext": kb_file.ext},
+            "op": op,
+            "result": r.result,
+            "meta": r.meta,
+        }
+
+    dl_file, dl_text = load_full_text_for_download(db, current.tenant_id, fid)
+    if dl_file:
+        if op == "csv_filter":
+            r = compute_csv_filter(stored_path=dl_file.stored_path or "", ext=dl_file.ext or "", arg=arg, flags=flags)
+        else:
+            r = compute_on_text(text=dl_text, op=op, arg=arg, flags=flags)
+        if not r.ok:
+            raise HTTPException(status_code=400, detail=r.meta.get("error") or "compute falhou")
+        return {
+            "ok": True,
+            "file": {"id": dl_file.id, "filename": dl_file.filename, "ext": dl_file.ext},
+            "op": op,
+            "result": r.result,
+            "meta": r.meta,
+        }
+
+    raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+
+
+@app.post("/api/kb/compute")
+def kb_compute_api(
+    payload: KBComputeRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    return kb_compute(payload, db, current)

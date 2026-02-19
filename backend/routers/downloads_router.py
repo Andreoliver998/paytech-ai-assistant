@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import DownloadFileDB
+from ..services.auth_service import AuthContext, get_current_user
 from ..services.downloads_service import (
     ALLOWED_EXTS,
     delete_download,
@@ -34,6 +35,7 @@ class SearchRequest(BaseModel):
 @router.post("/upload")
 async def downloads_upload(
     db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
     file: UploadFile | None = File(None),
     files: List[UploadFile] | None = File(None),
 ):
@@ -70,6 +72,7 @@ async def downloads_upload(
         try:
             chunks_added = index_download_file(
                 db=db,
+                tenant_id=current.tenant_id,
                 file_id=doc_id,
                 filename=filename,
                 ext=ext,
@@ -86,13 +89,24 @@ async def downloads_upload(
 
 @router.get("")
 @router.get("/")
-def downloads_list(db: Session = Depends(get_db)):
-    return {"files": list_downloads(db)}
+def downloads_list(
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    return {"files": list_downloads(db, current.tenant_id)}
 
 
 @router.get("/{file_id}")
-def downloads_get(file_id: str, db: Session = Depends(get_db)):
-    f = db.get(DownloadFileDB, (file_id or "").strip())
+def downloads_get(
+    file_id: str,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    f = (
+        db.query(DownloadFileDB)
+        .filter(DownloadFileDB.id == (file_id or "").strip(), DownloadFileDB.tenant_id == current.tenant_id)
+        .first()
+    )
     if not f:
         raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
 
@@ -113,8 +127,12 @@ def downloads_get(file_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/{file_id}")
-def downloads_delete(file_id: str, db: Session = Depends(get_db)):
-    f = delete_download(db, file_id)
+def downloads_delete(
+    file_id: str,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    f = delete_download(db, current.tenant_id, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
 
@@ -129,6 +147,10 @@ def downloads_delete(file_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/search")
-def downloads_search(payload: SearchRequest, db: Session = Depends(get_db)):
-    items = search_downloads(db, payload.query, payload.top_k)
+def downloads_search(
+    payload: SearchRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    items = search_downloads(db, current.tenant_id, payload.query, payload.top_k)
     return {"items": items}
