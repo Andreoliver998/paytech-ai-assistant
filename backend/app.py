@@ -432,9 +432,47 @@ def _is_list_documents_request(last_user: Optional[str]) -> bool:
         "documentos armazen",
         "arquivos armazen",
         "documentos que você tem",
+        "documentos que voce tem",
         "documentos disponíveis",
+        "documentos disponiveis",
+        "o que você tem",
+        "o que voce tem",
+        "quais você tem",
+        "quais voce tem",
     ]
     return any(x in t for x in triggers)
+
+
+def _extract_list_docs_hint(last_user: Optional[str]) -> str:
+    """
+    Try to extract an entity hint from messages like:
+      - "O que você tem do Bradesco?"
+      - "Quais documentos do Bradesco?"
+      - "Quais arquivos da fatura?"
+    """
+    t = (last_user or "").strip()
+    if not t:
+        return ""
+    m = re.search(r"\b(?:documentos?|arquivos?)\s+(?:do|da|de)\s+(.+)$", t, flags=re.IGNORECASE)
+    if not m:
+        m = re.search(r"\b(?:tem|possui)\s+(?:do|da|de)\s+(.+)$", t, flags=re.IGNORECASE)
+    if not m:
+        return ""
+    hint = (m.group(1) or "").strip()
+    hint = re.split(r"[?.!,;:()\[\]{}]+", hint)[0].strip()
+    return hint[:140].strip()
+
+
+def _filter_downloads_by_hint(items: List[Dict[str, Any]], hint: str) -> List[Dict[str, Any]]:
+    h = (hint or "").strip().lower()
+    if not h:
+        return items
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        name = str(it.get("filename") or "").lower()
+        if h in name:
+            out.append(it)
+    return out
 
 def _format_downloads_list_markdown(items: List[Dict[str, Any]]) -> str:
     if not items:
@@ -1398,6 +1436,47 @@ def chat(
             )
             return {"reply": reply, "sources": sources if show_sources else []}
 
+        # Fast path: list documents without an LLM roundtrip.
+        # If user narrows by hint (e.g. "O que você tem do Bradesco?") and only one match exists,
+        # we also activate document_mode for subsequent questions in the same session/thread.
+        if _is_list_documents_request(last_user):
+            hint = _extract_list_docs_hint(last_user)
+            files = list_downloads(db, current.tenant_id)
+            filtered = _filter_downloads_by_hint(files, hint) if hint else files
+
+            if hint and session_key and len(filtered) == 1:
+                only = filtered[0] or {}
+                fid = str(only.get("id") or "").strip()
+                fname = str(only.get("filename") or "").strip()
+                if fid and fname:
+                    doc_state = _upsert_doc_state(
+                        db,
+                        current.tenant_id,
+                        session_key,
+                        document_mode=True,
+                        active_file_id=fid,
+                        active_filename=fname,
+                    )
+                    reply = _format_downloads_list_markdown(filtered) + f"\n\nDocumento atual definido: {fname}."
+                    return {"reply": reply, "sources": []}
+
+            return {
+                "reply": _format_downloads_list_markdown(filtered),
+                "sources": [],
+                "debug": {
+                    "received_messages": len(payload.messages),
+                    "sent_to_model": 0,
+                    "context_used": 0,
+                    "model": settings.OPENAI_MODEL,
+                    "use_kb": False,
+                    "use_downloads": False,
+                    "response_mode": _normalize_response_mode(payload.response_mode),
+                    "saved_to_db": bool(payload.session_id),
+                    "fast_path": "list_downloads",
+                    "downloads_count": len(filtered),
+                },
+            }
+
         if precision_on and last_user:
 
             intent = detect_deterministic_intent(last_user)
@@ -1416,26 +1495,6 @@ def chat(
                         "sources": det_sources if show_sources else [],
                         "debug": {**det_debug},
                     }
-
-        # Fast path: list documents without an LLM roundtrip (reduz latência e evita respostas inúteis).
-        if _is_list_documents_request(last_user):
-            files = list_downloads(db, current.tenant_id)
-            return {
-                "reply": _format_downloads_list_markdown(files),
-                "sources": [],
-                "debug": {
-                    "received_messages": len(payload.messages),
-                    "sent_to_model": 0,
-                    "context_used": 0,
-                    "model": settings.OPENAI_MODEL,
-                    "use_kb": False,
-                    "use_downloads": False,
-                    "response_mode": _normalize_response_mode(payload.response_mode),
-                    "saved_to_db": bool(payload.session_id),
-                    "fast_path": "list_downloads",
-                    "downloads_count": len(files),
-                },
-            }
 
         effective_user_id = current.user_id
         prefs = get_preferences(db, effective_user_id) if effective_user_id else {}
@@ -1715,16 +1774,38 @@ def chat_stream(
 
             # Fast path: list documents (stream-friendly; avoids planner/tools overhead).
             if _is_list_documents_request(last_user):
-                yield _sse("status", {"phase": "answer"})
+                hint = _extract_list_docs_hint(last_user)
                 files = list_downloads(db, current.tenant_id)
-                yield _sse("delta", {"text": _format_downloads_list_markdown(files)})
+                filtered = _filter_downloads_by_hint(files, hint) if hint else files
+
+                if hint and session_key and len(filtered) == 1:
+                    only = filtered[0] or {}
+                    fid = str(only.get("id") or "").strip()
+                    fname = str(only.get("filename") or "").strip()
+                    if fid and fname:
+                        doc_state = _upsert_doc_state(
+                            db,
+                            current.tenant_id,
+                            session_key,
+                            document_mode=True,
+                            active_file_id=fid,
+                            active_filename=fname,
+                        )
+                        reply = _format_downloads_list_markdown(filtered) + f"\n\nDocumento atual definido: {fname}."
+                        yield _sse("status", {"phase": "answer"})
+                        yield _sse("delta", {"text": reply})
+                        yield _sse("status", {"phase": "done", "message_id": message_id, "doc_mode": True})
+                        return
+
+                yield _sse("status", {"phase": "answer"})
+                yield _sse("delta", {"text": _format_downloads_list_markdown(filtered)})
                 yield _sse(
                     "status",
                     {
                         "phase": "done",
                         "message_id": message_id,
                         "fast_path": "list_downloads",
-                        "downloads_count": len(files),
+                        "downloads_count": len(filtered),
                     },
                 )
                 return
@@ -1865,7 +1946,7 @@ def chat_stream(
                             "Você é um analisador técnico de documentos. Sua única fonte de verdade é o conteúdo em 'Evidências'.\n"
                             "Regras:\n"
                             "- Responda somente com base nas evidências.\n"
-                            "- Se não estiver explicitamente nas evidências, responda apenas: 'Essa informação não consta no documento analisado.'\n"
+                            "- Se não estiver explicitamente nas evidências, responda apenas: 'Não encontrei essa informação no(s) documento(s) indexado(s).'\n"
                             "- Proibido sugerir verificar app/banco/outra fonte.\n"
                             "- Proibido usar linguagem genérica (ex.: 'Recomendo consultar...').\n"
                             "- Para valores/datas/números/parcelas: devolva exatamente como está no documento."

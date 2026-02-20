@@ -377,7 +377,7 @@ def build_rag_system_prompt(chunks: List[Dict[str, Any]]) -> str:
             "Você é um analisador técnico de documentos.\n"
             "Sua única fonte de verdade é o CONTEXTO fornecido.\n"
             "Se a informação não estiver explicitamente no CONTEXTO, responda apenas:\n"
-            "'Essa informação não consta no documento analisado.'"
+            "'Não encontrei essa informação no(s) documento(s) indexado(s).'"
         )
 
     parts: List[str] = []
@@ -395,7 +395,7 @@ def build_rag_system_prompt(chunks: List[Dict[str, Any]]) -> str:
         "  - 'Se precisar...'\n"
         "- Se a informação existir no CONTEXTO, responda com precisão absoluta.\n"
         "- Se a informação NÃO estiver explicitamente no CONTEXTO, responda apenas:\n"
-        "  'Essa informação não consta no documento analisado.'\n"
+        "  'Não encontrei essa informação no(s) documento(s) indexado(s).'\n"
         "\nPRECISÃO:\n"
         "- Para perguntas como 'qual o valor', 'qual a data', 'quantas parcelas', 'qual o número':\n"
         "  localize explicitamente no CONTEXTO e devolva exatamente como está no documento.\n"
