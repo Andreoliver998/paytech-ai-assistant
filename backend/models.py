@@ -19,6 +19,20 @@ class SessionDB(Base):
 
     messages = relationship("MessageDB", back_populates="session", cascade="all, delete-orphan")
 
+
+class SessionDocStateDB(Base):
+    __tablename__ = "session_doc_state"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+
+    document_mode: Mapped[int] = mapped_column(Integer, default=0)  # 0/1 for SQLite portability
+    active_file_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    active_filename: Mapped[str | None] = mapped_column(String(260), nullable=True)
+
+    createdAt: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime, default=now)
+
 class MessageDB(Base):
     __tablename__ = "messages"
 

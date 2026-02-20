@@ -112,6 +112,26 @@ def dataframe_to_text(df: pd.DataFrame, source_name: str) -> str:
     except Exception:
         lines.append("(falha ao renderizar amostra)")
     lines.append("")
+
+    # Deterministic-friendly row-wise dump (bounded).
+    # This enables exact queries (counts/list/extractions) without relying only on chunk samples.
+    max_rows = 2000
+    try:
+        total = int(df.shape[0])
+    except Exception:
+        total = len(df)
+    if total > 0:
+        lines.append(f"DADOS (CSV linha-a-linha, até {max_rows} linhas):")
+        try:
+            # Prefer CSV format for stability across Pandas versions.
+            csv_text = df.head(max_rows).to_csv(index=False)
+            lines.append(csv_text.strip())
+            if total > max_rows:
+                lines.append(f"(truncado: {total} linhas no total)")
+        except Exception:
+            lines.append("(falha ao serializar CSV completo)")
+        lines.append("")
+
     lines.append("DESCRIBE (numérico/geral):")
     try:
         lines.append(df.describe(include="all").to_string())

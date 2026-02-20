@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import concurrent.futures
 from contextlib import asynccontextmanager
 
+import pandas as pd
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, Response
@@ -21,7 +22,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from .db import get_db, SessionLocal, bootstrap_database
-from .models import DownloadChunkDB, DownloadFileDB, FileDB, KBChunkDB, MembershipDB, MessageDB, SessionDB, TenantDB, UserDB
+from .models import DownloadChunkDB, DownloadFileDB, FileDB, KBChunkDB, MembershipDB, MessageDB, SessionDB, SessionDocStateDB, TenantDB, UserDB
 from .services.openai_service import gerar_resposta, gerar_resposta_stream, get_client
 from .services.auth_service import AuthContext, authenticate_user, create_access_token, get_current_user, maybe_seed_demo, register_user
 from .services.downloads_service import list_downloads, search_downloads
@@ -48,6 +49,7 @@ from .services.precision_service import (
     load_full_text_for_kb_file,
     find_file_by_hint,
 )
+from .services.doc_query_deterministic import extract_dates, extract_installments, extract_money, count_substring, find_lines_with_keyword
 from .settings import settings, validate_openai_settings, openai_settings_hint, ENV_FILE_USED
 from .utils.files import DATA_DIR, UPLOADS_DIR, KB_FILE
 from .utils.text import sanitize_and_trim_messages
@@ -229,6 +231,179 @@ def _persist_message(db: Session, tenant_id: str, session_id: str, role: str, co
     if s:
         s.updatedAt = datetime.now()
     db.commit()
+
+
+def _session_key_from_payload(payload: ChatRequest) -> str:
+    return (payload.session_id or payload.thread_id or "").strip()
+
+
+def _load_doc_state(db: Session, tenant_id: str, session_key: str) -> SessionDocStateDB | None:
+    sid = (session_key or "").strip()
+    if not sid:
+        return None
+    return (
+        db.query(SessionDocStateDB)
+        .filter(SessionDocStateDB.session_id == sid, SessionDocStateDB.tenant_id == tenant_id)
+        .first()
+    )
+
+
+def _upsert_doc_state(
+    db: Session,
+    tenant_id: str,
+    session_key: str,
+    *,
+    document_mode: bool,
+    active_file_id: Optional[str],
+    active_filename: Optional[str],
+) -> SessionDocStateDB | None:
+    sid = (session_key or "").strip()
+    if not sid:
+        return None
+    row = _load_doc_state(db, tenant_id, sid)
+    now = datetime.now()
+    if not row:
+        row = SessionDocStateDB(
+            session_id=sid,
+            tenant_id=tenant_id,
+            document_mode=1 if document_mode else 0,
+            active_file_id=(active_file_id or None),
+            active_filename=(active_filename or None),
+            createdAt=now,
+            updatedAt=now,
+        )
+        db.add(row)
+    else:
+        row.document_mode = 1 if document_mode else 0
+        row.active_file_id = active_file_id or None
+        row.active_filename = active_filename or None
+        row.updatedAt = now
+    db.commit()
+    return row
+
+
+def _detect_exit_document_mode(user_text: Optional[str]) -> bool:
+    low = (user_text or "").strip().lower()
+    if not low:
+        return False
+    return any(
+        k in low
+        for k in [
+            "voltar geral",
+            "modo geral",
+            "sair do documento",
+            "fechar documento",
+            "desativar documento",
+            "mudar documento",
+            "trocar documento",
+            "consultar outro",
+            "consultar outro documento",
+            "outro documento",
+            "usar outro",
+        ]
+    )
+
+
+def _detect_document_select_hint(user_text: Optional[str]) -> str:
+    """
+    Returns a document hint when the user explicitly selects a document.
+    Accepts either full filenames (foo.pdf) or loose names (e.g., 'Bradesco').
+    """
+    t = (user_text or "").strip()
+    low = t.lower()
+    if not low:
+        return ""
+
+    # explicit filename or id
+    mfile = re.search(r"([\w\-\.\s]+?\.(pdf|csv|xlsx|txt))", t, flags=re.IGNORECASE)
+    if mfile:
+        return (mfile.group(1) or "").strip()
+    mid = re.search(r"\b([a-f0-9]{32})\b", low)
+    if mid:
+        return (mid.group(1) or "").strip()
+
+    # "abrir documento X", "usar documento X", "mudar/trocar documento para X", "consultar outro documento X"
+    mdoc = re.search(
+        r"\b(?:abrir|use|usar|consultar|mudar|trocar|selecionar|escolher|no|na|do|da)\s+"
+        r"(?:(?:outro|nova|novo)\s+)?"
+        r"(?:o\s+)?(?:documento|arquivo)\s+"
+        r"(?:para\s+)?(.+)$",
+        t,
+        flags=re.IGNORECASE,
+    )
+    if mdoc:
+        hint = (mdoc.group(1) or "").strip()
+        hint = re.split(r"[?.!,;:()\[\]{}]+", hint)[0].strip()
+        return hint[:140].strip()
+
+    # "preciso do Bradesco" / "quero o Bradesco"
+    mneed = re.search(r"\b(?:preciso|quero|usar|abra|abrir)\s+(?:do|da|de|o|a)\s+(.+)$", t, flags=re.IGNORECASE)
+    if mneed and ("documento" in low or "arquivo" in low or len(t.split()) <= 6):
+        hint = (mneed.group(1) or "").strip()
+        hint = re.split(r"[?.!,;:()\[\]{}]+", hint)[0].strip()
+        return hint[:140].strip()
+
+    return ""
+
+
+def _resolve_file_from_hint(db: Session, tenant_id: str, hint: str) -> tuple[str, str] | None:
+    h = (hint or "").strip()
+    if not h:
+        return None
+
+    # Prefer explicit find (ids/filenames).
+    hit = find_file_by_hint(db, tenant_id, h)
+    if hit:
+        kind, fid = hit
+        if kind == "kb":
+            row = db.query(FileDB).filter(FileDB.tenant_id == tenant_id, FileDB.file_id == fid).first()
+            if row:
+                return (str(row.file_id), str(row.filename))
+        if kind == "downloads":
+            row = db.query(DownloadFileDB).filter(DownloadFileDB.tenant_id == tenant_id, DownloadFileDB.id == fid).first()
+            if row:
+                return (str(row.id), str(row.filename))
+
+    # Loose match on filename
+    like = f"%{h.lower()}%"
+    row2 = (
+        db.query(FileDB)
+        .filter(FileDB.tenant_id == tenant_id)
+        .filter(FileDB.filename.ilike(like))
+        .order_by(FileDB.createdAt.desc())
+        .first()
+    )
+    if row2:
+        return (str(row2.file_id), str(row2.filename))
+    row3 = (
+        db.query(DownloadFileDB)
+        .filter(DownloadFileDB.tenant_id == tenant_id)
+        .filter(DownloadFileDB.filename.ilike(like))
+        .order_by(DownloadFileDB.createdAt.desc())
+        .first()
+    )
+    if row3:
+        return (str(row3.id), str(row3.filename))
+
+    # Fallback: use retrieval to pick the most likely file_id.
+    sem = retrieve_context(db, tenant_id, h, top_k=10)
+    lex = retrieve_context_lexical(db, tenant_id, h, top_k=10)
+    best = str(_pick_best_file_id(lex=lex, sem=sem) or "").strip()
+    if best:
+        kb = db.query(FileDB).filter(FileDB.tenant_id == tenant_id, FileDB.file_id == best).first()
+        if kb:
+            return (str(kb.file_id), str(kb.filename))
+        dl = db.query(DownloadFileDB).filter(DownloadFileDB.tenant_id == tenant_id, DownloadFileDB.id == best).first()
+        if dl:
+            return (str(dl.id), str(dl.filename))
+
+    return None
+
+
+def _document_mode_status_line(state: SessionDocStateDB | None) -> str:
+    if not state or not bool(state.document_mode) or not (state.active_filename or "").strip():
+        return ""
+    return f"Documento atual: {state.active_filename}"
 
 
 def _should_use_kb(last_user: Optional[str]) -> bool:
@@ -1150,9 +1325,81 @@ def chat(
                 break
 
         precision_on = payload.precision is not False
+        session_key = _session_key_from_payload(payload)
+        show_sources = bool(payload.show_sources) or _did_user_request_sources(last_user)
+
+        # =========================================================
+        # Document Session State (sticky active document per session/thread)
+        # =========================================================
+        doc_state: SessionDocStateDB | None = None
+        if session_key:
+            doc_state = _load_doc_state(db, current.tenant_id, session_key)
+
+        if last_user and session_key:
+            # Prefer selection in the same message ("mudar documento para X") over exiting.
+            hint = _detect_document_select_hint(last_user)
+            resolved = _resolve_file_from_hint(db, current.tenant_id, hint) if hint else None
+            if resolved:
+                fid, fname = resolved
+                doc_state = _upsert_doc_state(
+                    db,
+                    current.tenant_id,
+                    session_key,
+                    document_mode=True,
+                    active_file_id=fid,
+                    active_filename=fname,
+                )
+                # If this was a "selection only" message, acknowledge and stop.
+                low = (last_user or "").lower()
+                has_question_signal = any(
+                    k in low
+                    for k in [
+                        "?",
+                        "quant",
+                        "qual",
+                        "liste",
+                        "listar",
+                        "resum",
+                        "conte",
+                        "contar",
+                        "total",
+                        "valor",
+                        "data",
+                        "cpf",
+                        "cnpj",
+                        "venc",
+                        "parcela",
+                    ]
+                )
+                if not has_question_signal and len((last_user or "").split()) <= 7:
+                    return {
+                        "reply": f"Ok. Documento atual definido: {fname}. Pode perguntar.",
+                        "sources": [],
+                    }
+            elif _detect_exit_document_mode(last_user):
+                doc_state = _upsert_doc_state(
+                    db,
+                    current.tenant_id,
+                    session_key,
+                    document_mode=False,
+                    active_file_id=None,
+                    active_filename=None,
+                )
+
+        # If we're in document_mode, always answer using the active document only.
+        if last_user and doc_state and bool(doc_state.document_mode) and (doc_state.active_file_id or "").strip():
+            reply, sources = _answer_with_active_document(
+                db=db,
+                current=current,
+                user_text=last_user,
+                active_file_id=str(doc_state.active_file_id),
+                include_sources=show_sources,
+                precision_on=precision_on,
+            )
+            return {"reply": reply, "sources": sources if show_sources else []}
 
         if precision_on and last_user:
-            show_sources = bool(payload.show_sources) or _did_user_request_sources(last_user)
+
             intent = detect_deterministic_intent(last_user)
             if intent:
                 det = _deterministic_reply_from_intent(
@@ -1373,6 +1620,79 @@ def chat_stream(
                     break
             show_sources = bool(payload.show_sources) or _did_user_request_sources(last_user)
             precision_on = payload.precision is not False
+            session_key = _session_key_from_payload(payload)
+
+            # =========================================================
+            # Document Session State (sticky active document per session/thread)
+            # =========================================================
+            doc_state: SessionDocStateDB | None = None
+            if session_key:
+                doc_state = _load_doc_state(db, current.tenant_id, session_key)
+
+            if last_user and session_key:
+                hint = _detect_document_select_hint(last_user)
+                resolved = _resolve_file_from_hint(db, current.tenant_id, hint) if hint else None
+                if resolved:
+                    fid, fname = resolved
+                    doc_state = _upsert_doc_state(
+                        db,
+                        current.tenant_id,
+                        session_key,
+                        document_mode=True,
+                        active_file_id=fid,
+                        active_filename=fname,
+                    )
+                    low = (last_user or "").lower()
+                    has_question_signal = any(
+                        k in low
+                        for k in [
+                            "?",
+                            "quant",
+                            "qual",
+                            "liste",
+                            "listar",
+                            "resum",
+                            "conte",
+                            "contar",
+                            "total",
+                            "valor",
+                            "data",
+                            "cpf",
+                            "cnpj",
+                            "venc",
+                            "parcela",
+                        ]
+                    )
+                    if not has_question_signal and len((last_user or "").split()) <= 7:
+                        yield _sse("status", {"phase": "answer"})
+                        yield _sse("delta", {"text": f"Ok. Documento atual definido: {fname}. Pode perguntar."})
+                        yield _sse("status", {"phase": "done", "message_id": message_id, "doc_mode": True})
+                        return
+                elif _detect_exit_document_mode(last_user):
+                    doc_state = _upsert_doc_state(
+                        db,
+                        current.tenant_id,
+                        session_key,
+                        document_mode=False,
+                        active_file_id=None,
+                        active_filename=None,
+                    )
+
+            if doc_state and bool(doc_state.document_mode) and (doc_state.active_file_id or "").strip() and last_user:
+                reply, sources = _answer_with_active_document(
+                    db=db,
+                    current=current,
+                    user_text=last_user,
+                    active_file_id=str(doc_state.active_file_id),
+                    include_sources=show_sources,
+                    precision_on=precision_on,
+                )
+                yield _sse("status", {"phase": "answer"})
+                yield _sse("delta", {"text": reply})
+                if show_sources and sources:
+                    yield _sse("sources", sources)
+                yield _sse("status", {"phase": "done", "message_id": message_id, "doc_mode": True})
+                return
 
             if precision_on and last_user:
                 intent = detect_deterministic_intent(last_user)
@@ -1625,6 +1945,353 @@ def user_requested_sources(text: Optional[str]) -> bool:
     return _did_user_request_sources(text)
 
 
+def should_use_doc_query(text: Optional[str]) -> bool:
+    """
+    Heuristic: return True when the user likely expects an exact, deterministic answer
+    grounded in a document (counts, listings, exact values, extractions).
+    """
+    t = (text or "").strip()
+    low = t.lower()
+    if not low:
+        return False
+
+    # Strong exact-query signals
+    keywords = [
+        "quantos",
+        "quantas",
+        "conte",
+        "contar",
+        "contagem",
+        "número de",
+        "numero de",
+        "quantidade de",
+        "listar",
+        "liste",
+        "lista",
+        "todas as ocorrências",
+        "todas as ocorrencias",
+        "ocorrências",
+        "ocorrencias",
+        "extraia",
+        "extrair",
+        "copie",
+        "mostre exatamente",
+        "exatamente",
+        "valor exato",
+        "parcelas",
+        "parcela",
+        "datas",
+        "data",
+        "vencimento",
+        "cpf",
+        "cnpj",
+    ]
+    if any(k in low for k in keywords):
+        return True
+
+    # "?" is often used for counts of punctuation or explicit "quantos ?"
+    if "?" in low and ("quant" in low or "ocorr" in low or "conte" in low):
+        return True
+
+    return False
+
+
+def _doc_mode_not_found_message() -> str:
+    return "Não encontrei essa informação no documento atual."
+
+
+def _looks_like_not_found_reply(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    return any(
+        k in t
+        for k in [
+            "essa informação não consta",
+            "essa informacao nao consta",
+            "não encontrei essa informação",
+            "nao encontrei essa informacao",
+            "não encontrei evidência suficiente",
+            "nao encontrei evidencia suficiente",
+        ]
+    )
+
+
+def _extract_query_terms(text: str, *, max_terms: int = 6) -> List[str]:
+    low = (text or "").lower()
+    terms = re.findall(r"[\wÀ-ÿ]{2,}", low, flags=re.UNICODE)
+    stop = {
+        "de",
+        "da",
+        "do",
+        "das",
+        "dos",
+        "a",
+        "o",
+        "as",
+        "os",
+        "um",
+        "uma",
+        "e",
+        "ou",
+        "para",
+        "por",
+        "com",
+        "sem",
+        "no",
+        "na",
+        "nos",
+        "nas",
+        "que",
+        "qual",
+        "quais",
+        "quando",
+        "onde",
+        "como",
+        "quanto",
+        "quantos",
+        "quantas",
+        "me",
+        "eu",
+        "você",
+        "voce",
+        "sobre",
+        "documento",
+        "arquivo",
+        "pdf",
+        "csv",
+        "xlsx",
+        "txt",
+    }
+    out: List[str] = []
+    seen = set()
+    for t in terms:
+        if t in stop or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= max_terms:
+            break
+    return out
+
+
+def _answer_with_active_document(
+    *,
+    db: Session,
+    current: AuthContext,
+    user_text: str,
+    active_file_id: str,
+    include_sources: bool,
+    precision_on: bool,
+) -> tuple[str, List[Dict[str, Any]]]:
+    """
+    Document Session State: always answer using the active document only.
+    """
+    fid = (active_file_id or "").strip()
+    if not fid:
+        return (_doc_mode_not_found_message(), [])
+
+    kb_file, full_text = load_full_text_for_kb_file(db, current.tenant_id, fid)
+    dl_file = None
+    if not kb_file:
+        dl_file, full_text = load_full_text_for_download(db, current.tenant_id, fid)
+
+    fobj = kb_file or dl_file
+    if not fobj:
+        return ("Documento atual não encontrado. Selecione o documento novamente.", [])
+
+    filename = str(getattr(fobj, "filename", "") or "arquivo")
+    sources = [{"ref": "Fonte 1", "filename": filename, "file_id": fid}] if include_sources else []
+
+    # Deterministic-first for exact queries
+    if precision_on and user_text:
+        intent = detect_deterministic_intent(user_text)
+        if intent:
+            det = _deterministic_reply_from_intent(
+                db=db,
+                current=current,
+                intent=intent,
+                user_text=user_text,
+                explicit_file_id=fid,
+            )
+            if det:
+                reply_text, _dbg, det_sources = det
+                if _looks_like_not_found_reply(reply_text):
+                    return (_doc_mode_not_found_message(), sources if include_sources else [])
+                # keep deterministic sources minimal (one doc)
+                return (reply_text, sources if include_sources else [])
+
+    low = (user_text or "").lower()
+    is_summary = any(k in low for k in ["resumo", "resuma", "resumir", "resumo completo", "sumarize", "sumário", "sumario"])
+
+    # Build evidence from the active document only
+    evidence = ""
+    if is_summary:
+        # Use a bounded prefix for summarization (extracted text can be huge).
+        excerpt = (full_text or "").strip()
+        excerpt = excerpt[:14000]
+        if not excerpt:
+            return (_doc_mode_not_found_message(), sources if include_sources else [])
+        evidence = "Documento (trecho extraído):\n" + excerpt
+    else:
+        terms = _extract_query_terms(user_text, max_terms=6)
+        blocks: List[str] = []
+        for term in terms:
+            for b in find_lines_with_keyword(full_text or "", term, window=2, case_insensitive=True, max_hits=10):
+                blocks.append(b)
+                if len(blocks) >= 18:
+                    break
+            if len(blocks) >= 18:
+                break
+        blocks = [b for b in blocks if b.strip()]
+        if blocks:
+            evidence = "Evidências (somente do documento atual):\n\n" + "\n\n---\n\n".join(blocks[:18])
+
+    if not evidence.strip():
+        return (_doc_mode_not_found_message(), sources if include_sources else [])
+
+    sys = (
+        "Você é um analisador técnico de UM ÚNICO documento (o documento atual).\n"
+        "Sua única fonte de verdade é o conteúdo em 'Evidências'.\n"
+        "Regras:\n"
+        "- Responda somente com base nas evidências.\n"
+        f"- Se não estiver explicitamente nas evidências, responda apenas: '{_doc_mode_not_found_message()}'\n"
+        "- Para valores/datas/números/parcelas: devolva exatamente como está no documento.\n"
+        "- Não misture outros documentos.\n"
+    )
+    answer = gerar_resposta(
+        mensagens=[
+            {"role": "system", "content": sys},
+            {"role": "system", "content": evidence},
+            {"role": "user", "content": user_text},
+        ],
+        modelo=settings.OPENAI_MODEL,
+        temperatura=_temperature(True),
+    ).strip()
+
+    if _looks_like_not_found_reply(answer):
+        return (_doc_mode_not_found_message(), sources if include_sources else [])
+    return (answer, sources if include_sources else [])
+
+
+class DocQueryRequest(BaseModel):
+    question: str
+    file_id: Optional[str] = None
+    filename: Optional[str] = None
+    mode: str = "auto"  # auto|rag|doc_query
+
+
+@app.post("/doc/query")
+def doc_query(
+    payload: DocQueryRequest,
+    db: Session = Depends(get_db),
+    current: AuthContext = Depends(get_current_user),
+):
+    hint = openai_settings_hint(settings)
+    if hint:
+        raise HTTPException(status_code=503, detail=hint)
+
+    question = (payload.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question é obrigatório.")
+
+    mode = (payload.mode or "auto").strip().lower()
+    if mode not in ("auto", "rag", "doc_query"):
+        raise HTTPException(status_code=400, detail="mode deve ser auto|rag|doc_query.")
+
+    include_sources = _did_user_request_sources(question)
+
+    # Resolve explicit file hint (optional).
+    explicit_file_id = (payload.file_id or "").strip()
+    if not explicit_file_id and (payload.filename or "").strip():
+        hit = find_file_by_hint(db, current.tenant_id, (payload.filename or "").strip())
+        if hit:
+            explicit_file_id = hit[1]
+
+    use_doc_query = mode == "doc_query" or (mode == "auto" and should_use_doc_query(question))
+    used_mode = "doc_query" if use_doc_query else "rag"
+
+    if use_doc_query:
+        intent = detect_deterministic_intent(question) or {"action": "extract", "target": "auto"}
+        det = _deterministic_reply_from_intent(
+            db=db,
+            current=current,
+            intent=intent,
+            user_text=question,
+            explicit_file_id=explicit_file_id,
+        )
+        if not det:
+            return {
+                "ok": True,
+                "mode_used": used_mode,
+                "answer": "Não encontrei essa informação no(s) documento(s) indexado(s).",
+                "file": None,
+                "sources": [],
+            }
+        answer, debug, sources = det
+        return {
+            "ok": True,
+            "mode_used": used_mode,
+            "answer": answer,
+            "file": {"file_id": debug.get("file_id"), "filename": debug.get("filename")},
+            "sources": sources if include_sources else [],
+            "debug": debug,
+        }
+
+    # RAG mode: embeddings + top_k chunks (ChatGPT-with-documents style).
+    top_k = 8
+    chunks = retrieve_context(db, current.tenant_id, question, top_k=top_k)
+    if not chunks:
+        return {
+            "ok": True,
+            "mode_used": used_mode,
+            "answer": "Não encontrei evidência suficiente nos documentos indexados para responder com segurança.",
+            "sources": [],
+        }
+
+    evidence_lines = ["Evidências (documentos do usuário):"]
+    sources: List[Dict[str, Any]] = []
+    for i, c in enumerate(chunks, start=1):
+        filename = str(c.get("filename") or "arquivo")
+        snippet = str(c.get("text") or "").strip()
+        sources.append(
+            {
+                "ref": f"Fonte {i}",
+                "filename": filename,
+                "file_id": c.get("file_id"),
+                "snippet": snippet[:900],
+                "score": float(c.get("score") or 0.0),
+            }
+        )
+        evidence_lines.append(f"[{i}] {filename}\n{snippet}")
+    evidence_block = "\n\n".join(evidence_lines)
+
+    sys = (
+        "Você é um analisador técnico de documentos. Sua única fonte de verdade é o conteúdo em 'Evidências'.\n"
+        "Regras:\n"
+        "- Responda somente com base nas evidências.\n"
+        "- Se não estiver explicitamente nas evidências, responda apenas: 'Não encontrei essa informação no(s) documento(s) indexado(s).'\n"
+        "- Para valores/datas/números/parcelas: devolva exatamente como está no documento.\n"
+    )
+    answer = gerar_resposta(
+        mensagens=[
+            {"role": "system", "content": sys},
+            {"role": "system", "content": evidence_block},
+            {"role": "user", "content": question},
+        ],
+        modelo=settings.OPENAI_MODEL,
+        temperatura=_temperature(True),
+    ).strip()
+
+    return {
+        "ok": True,
+        "mode_used": used_mode,
+        "answer": answer,
+        "sources": sources if include_sources else [],
+        "meta": {"top_k": top_k},
+    }
+
+
 def detect_deterministic_intent(text: str) -> Dict[str, Any] | None:
     """
     Returns:
@@ -1644,16 +2311,33 @@ def detect_deterministic_intent(text: str) -> Dict[str, Any] | None:
     if mid and not file_hint:
         file_hint = mid.group(1)
 
-    def out(action: str, target: str) -> Dict[str, Any]:
-        d: Dict[str, Any] = {"action": action, "target": target}
+    def out(action: str, target: str, **extra: Any) -> Dict[str, Any]:
+        d: Dict[str, Any] = {"action": action, "target": target, **(extra or {})}
         if file_hint:
             d["file_hint"] = file_hint
         return d
 
+    # occurrences / exact matches (count or list)
+    # Examples:
+    # - "quantas ocorrências de 'foo' existem?"
+    # - "liste todas as ocorrências de foo"
+    if any(k in low for k in ["ocorrência", "ocorrencias", "ocorrência", "ocorrências", "vezes", "aparece"]):
+        mquoted = re.search(r"['\"]([^'\"]{1,120})['\"]", t)
+        needle = (mquoted.group(1) if mquoted else "").strip()
+        if not needle:
+            m3 = re.search(r"ocorr[eê]ncias?\s+de\s+(.+)$", low)
+            if m3:
+                needle = (m3.group(1) or "").strip().strip(".").strip()
+        if needle:
+            if re.search(r"\b(liste|listar|mostre|exiba|traga|todas)\b", low):
+                return out("list", "occurrences", needle=needle)
+            return out("count", "occurrences", needle=needle)
+
     if re.search(r"\b(quantos?|quantas?|contar|contagem|total\b|total de|qual o total|n[uú]mero de|quantidade de)\b", low):
-        if "interroga" in low or "?" in low:
+        # Only treat punctuation as target when the user explicitly asks about it.
+        if ("interroga" in low) or ("interrogação" in low) or ("interrogacao" in low) or ("ponto de interrogação" in low) or ("ponto de interrogacao" in low):
             return out("count", "punctuation")
-        if "exclama" in low or "!" in low:
+        if ("exclama" in low) or ("ponto de exclamação" in low) or ("ponto de exclamacao" in low):
             return out("count", "punctuation")
         if "caracter" in low or "chars" in low:
             return out("count", "chars")
@@ -1670,10 +2354,15 @@ def detect_deterministic_intent(text: str) -> Dict[str, Any] | None:
     if re.search(r"\b(linhas e colunas|quantas linhas|quantas colunas|colunas tem|linhas tem)\b", low):
         return out("stats", "table")
 
-    if re.search(r"\b(valor exato|cpf exato|data exata|nome exato)\b", low):
+    if re.search(r"\b(valor exato|cpf exato|data exata|nome exato|mostre exatamente|copie exatamente)\b", low):
         return out("extract", "field")
 
+    if re.search(r"\b(cpf|cnpj|vencimento|datas?\b|valor\b|r\\$|parcelas?|parcela)\b", low):
+        return out("extract", "auto")
+
     if re.search(r"\b(liste todos|liste todas|listar todos|listar todas)\b", low):
+        if "nome" in low or "nomes" in low:
+            return out("list", "names")
         return out("list", "all")
 
     return None
@@ -1741,6 +2430,7 @@ def _deterministic_reply_from_intent(
     action = str(intent.get("action") or "")
     target = str(intent.get("target") or "")
     file_hint = str(intent.get("file_hint") or "").strip()
+    needle = str(intent.get("needle") or "").strip()
 
     chosen_id = (explicit_file_id or "").strip()
     if not chosen_id and file_hint:
@@ -1799,6 +2489,8 @@ def _deterministic_reply_from_intent(
 
     if action == "count":
         s = full_text or ""
+        if target == "occurrences" and needle:
+            return (str(int(count_substring(s, needle, case_insensitive=True))), debug, sources)
         if target == "punctuation":
             q = s.count("?")
             e = s.count("!")
@@ -1875,19 +2567,114 @@ def _deterministic_reply_from_intent(
             if m:
                 line = _line_for_match(m.start(), m.end())
                 return (line or m.group(0), debug, sources)
+        if "cnpj" in lowq:
+            m = re.search(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b|\b\d{14}\b", s)
+            if m:
+                line = _line_for_match(m.start(), m.end())
+                return (line or m.group(0), debug, sources)
         if "data" in lowq or "venc" in lowq:
-            m = re.search(r"\b\d{2}/\d{2}/\d{4}\b|\b\d{4}-\d{2}-\d{2}\b", s)
-            if m:
-                line = _line_for_match(m.start(), m.end())
-                return (line or m.group(0), debug, sources)
+            dates = extract_dates(s)
+            if dates:
+                # keep the first date as-is (the user asked for exact value)
+                d0 = dates[0]
+                m = re.search(re.escape(d0), s)
+                if m:
+                    line = _line_for_match(m.start(), m.end())
+                    return (line or d0, debug, sources)
+                return (d0, debug, sources)
         if "valor" in lowq or "r$" in lowq:
-            m = re.search(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}", s)
-            if m:
-                line = _line_for_match(m.start(), m.end())
-                return (line or m.group(0), debug, sources)
-        return ("Essa informação não consta no documento analisado.", debug, sources)
+            money = extract_money(s)
+            if money:
+                m0 = money[0]
+                m = re.search(re.escape(m0), s)
+                if m:
+                    line = _line_for_match(m.start(), m.end())
+                    return (line or m0, debug, sources)
+                return (m0, debug, sources)
+        if "parcela" in lowq or "parcelas" in lowq:
+            inst = extract_installments(s)
+            if inst:
+                it = inst[0]
+                m = re.search(re.escape(it), s, flags=re.IGNORECASE)
+                if m:
+                    line = _line_for_match(m.start(), m.end())
+                    return (line or it, debug, sources)
+                return (it, debug, sources)
+        return ("Não encontrei essa informação no(s) documento(s) indexado(s).", debug, sources)
 
     if action == "list":
+        if target == "occurrences" and needle:
+            r = compute_on_text(
+                text=full_text or "",
+                op="find_all",
+                arg=needle,
+                flags={"case_insensitive": True, "regex": False, "max_hits": 60, "context": 90},
+            )
+            hits = r.result if isinstance(r.result, list) else []
+            if hits:
+                lines = []
+                for h in hits:
+                    ctx = str(h.get("context") or "").replace("\n", " ").strip()
+                    lines.append(ctx)
+                return ("\n".join(lines), debug, sources)
+            return ("Não encontrei essa informação no(s) documento(s) indexado(s).", debug, sources)
+
+        if target == "names":
+            # Prefer deterministic table parsing when available.
+            if ext in ("csv", "xlsx"):
+                try:
+                    p = Path(str(getattr(fobj, "stored_path", "") or "").strip())
+                    if p.exists() and p.is_file():
+                        df = pd.read_excel(p) if ext == "xlsx" else pd.read_csv(p)
+                        cols = [str(c).strip() for c in list(df.columns)]
+                        col_name = None
+                        for cand in ("nome", "nomes", "aluno", "alunos", "name", "student"):
+                            for c in cols:
+                                if c.strip().lower() == cand:
+                                    col_name = c
+                                    break
+                            if col_name:
+                                break
+                        if col_name:
+                            vals = [str(x).strip() for x in df[col_name].tolist() if str(x).strip() and str(x).strip().lower() not in ("nan", "none")]
+                            uniq = []
+                            seen = set()
+                            for v in vals:
+                                if v in seen:
+                                    continue
+                                seen.add(v)
+                                uniq.append(v)
+                            if uniq:
+                                return ("\n".join(uniq), debug, sources)
+                except Exception:
+                    pass
+
+            # Text fallback: capture "Nome: X" / "Aluno: X" or title-cased lines.
+            names: List[str] = []
+            for line in (full_text or "").splitlines():
+                l = (line or "").strip()
+                if not l:
+                    continue
+                m = re.search(r"\b(?:nome|aluno)\s*[:\-]\s*(.+)$", l, flags=re.IGNORECASE)
+                if m:
+                    cand = m.group(1).strip(" -•\t").strip()
+                    if cand:
+                        names.append(cand)
+                        continue
+                # Title-cased heuristic (2+ words, each starting with uppercase)
+                if re.fullmatch(r"[A-ZÀ-Ý][A-Za-zÀ-ÿ']+(?:\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ']+){1,5}", l):
+                    names.append(l)
+            uniq = []
+            seen = set()
+            for n in names:
+                if n in seen:
+                    continue
+                seen.add(n)
+                uniq.append(n)
+            if uniq:
+                return ("\n".join(uniq), debug, sources)
+            return ("Não encontrei essa informação no(s) documento(s) indexado(s).", debug, sources)
+
         # Minimal: list lines that contain a term after "liste todos os ..."
         m = re.search(r"liste (?:todos|todas) os?\s+(.+)$", (user_text or "").strip(), flags=re.IGNORECASE)
         term = (m.group(1) if m else "").strip()
@@ -1896,7 +2683,7 @@ def _deterministic_reply_from_intent(
             lines = r.result if isinstance(r.result, list) else []
             if lines:
                 return ("\n".join([str(x) for x in lines]), debug, sources)
-        return ("Essa informação não consta no documento analisado.", debug, sources)
+        return ("Não encontrei essa informação no(s) documento(s) indexado(s).", debug, sources)
 
     return None
 
