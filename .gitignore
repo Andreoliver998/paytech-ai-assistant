@@ -60,6 +60,9 @@ credentials*.json
 *.sqlite3
 *.log
 tmp_exports/
+tmp_smoke/
+tmp_smoke_dbg/
+tmp_smoke_state/
 
 # Backend runtime folders (this repo layout)
 backend/data/
