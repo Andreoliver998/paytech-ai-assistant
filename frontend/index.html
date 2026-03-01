@@ -34,6 +34,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" />
 
   <link rel="stylesheet" href="style.css?v=20260210_023" />
+  <link rel="stylesheet" href="lumina-theme.css?v=20260301_004" />
 
   <!-- Material Symbols Outlined -->
   <link rel="stylesheet"
@@ -56,6 +57,27 @@
 </head>
 
 <body>
+  <!-- Lumina decorative overlay (safe: pointer-events none; behind app) -->
+  <div class="lumina-overlay" aria-hidden="true">
+    <div class="lumina-overlay__frame">
+      <div class="lumina-overlay__grid"></div>
+      <!-- Light rain (vertical beams) -->
+      <i class="lumina-overlay__beam" style="--x: 14%; --h: 220px; --dur: 6.4s; --delay: -0.8s; --strength: 0.55;"></i>
+      <i class="lumina-overlay__beam" style="--x: 22%; --h: 360px; --dur: 7.6s; --delay: -3.2s; --strength: 0.65;"></i>
+      <i class="lumina-overlay__beam" style="--x: 30%; --h: 260px; --dur: 6.9s; --delay: -1.7s; --strength: 0.58;"></i>
+      <i class="lumina-overlay__beam" style="--x: 38%; --h: 520px; --dur: 8.8s; --delay: -5.1s; --strength: 0.78;"></i>
+      <i class="lumina-overlay__beam" style="--x: 46%; --h: 240px; --dur: 6.1s; --delay: -2.4s; --strength: 0.52;"></i>
+      <i class="lumina-overlay__beam" style="--x: 54%; --h: 420px; --dur: 9.2s; --delay: -6.0s; --strength: 0.82;"></i>
+      <i class="lumina-overlay__beam" style="--x: 62%; --h: 280px; --dur: 6.7s; --delay: -0.4s; --strength: 0.60;"></i>
+      <i class="lumina-overlay__beam" style="--x: 70%; --h: 480px; --dur: 8.1s; --delay: -4.3s; --strength: 0.74;"></i>
+      <i class="lumina-overlay__beam" style="--x: 78%; --h: 230px; --dur: 6.0s; --delay: -1.1s; --strength: 0.50;"></i>
+      <i class="lumina-overlay__beam" style="--x: 86%; --h: 390px; --dur: 7.8s; --delay: -3.8s; --strength: 0.70;"></i>
+      <i class="lumina-overlay__beam" style="--x: 92%; --h: 260px; --dur: 6.6s; --delay: -2.0s; --strength: 0.56;"></i>
+      <div class="lumina-overlay__centerline"></div>
+    </div>
+    <div class="lumina-overlay__vignette"></div>
+  </div>
+
   <div class="app" id="app">
 
     <!-- Sidebar (ChatGPT-like) -->
@@ -120,10 +142,6 @@
           <button class="icon-btn" id="responseModeBtn" type="button" aria-label="Modo de resposta"
             title="Modo de resposta">
             <span class="ms" aria-hidden="true">tune</span>
-          </button>
-          <button class="icon-btn theme-btn" id="themeToggle" type="button" aria-label="Alternar tema"
-            title="Alternar tema">
-            <span class="ms" aria-hidden="true">dark_mode</span>
           </button>
         </div>
       </header>
@@ -236,7 +254,7 @@
       hidden />
   </section>
 
-  <script defer src="app.js?v=20260219_009"></script>
+  <script defer src="app.js?v=20260301_003"></script>
   <script>
     (function () {
       var btn = document.getElementById("logoutBtn");

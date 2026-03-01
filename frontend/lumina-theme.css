@@ -1,0 +1,173 @@
+/* Lumina-inspired colors + safe decorative animations (no layout impact).
+   Goal: bring the Lumina vibe without touching app logic or structure. */
+
+:root {
+  /* Lumina palette */
+  --lumina-ink: #050505;
+  --lumina-orange-500: #f97316;
+  --lumina-orange-600: #ea580c;
+  --lumina-amber-400: #fbbf24;
+  --lumina-line: rgba(255, 255, 255, 0.06);
+  --lumina-line-soft: rgba(255, 255, 255, 0.035);
+  --lumina-beam-strong: rgba(249, 115, 22, 0.9);
+  --lumina-beam-mid: rgba(249, 115, 22, 0.65);
+
+  /* Override existing tokens (colors only) */
+  --brand: var(--lumina-orange-500);
+  --brand-hover: var(--lumina-orange-600);
+  --accent: var(--lumina-amber-400);
+  --focus-ring: rgba(249, 115, 22, 0.22);
+  --focus-glow: 0 0 0 3px rgba(249, 115, 22, 0.18);
+
+  /* App background image (file: `frontend/assets/lumina-bg.webp`) */
+  --lumina-bg-url: url("./assets/lumina-bg.webp");
+}
+
+/* Override the app's default gradients with the Lumina background image.
+   Use `!important` so `frontend/style.css` doesn't win. */
+html,
+body {
+  background:
+    linear-gradient(to bottom, rgba(5, 5, 5, 0.88), rgba(5, 5, 5, 0.58) 55%, rgba(5, 5, 5, 0.92)),
+    radial-gradient(ellipse at 50% 24%, rgba(249, 115, 22, 0.10), rgba(5, 5, 5, 0) 55%),
+    var(--lumina-bg-url) !important;
+  background-color: var(--lumina-ink) !important;
+  background-size: cover !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-attachment: fixed !important;
+}
+
+/* Ensure content stays above the decorative layer */
+.app {
+  position: relative;
+  z-index: 1;
+}
+
+.auth-layout {
+  position: relative;
+  z-index: 1;
+}
+
+.lumina-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* Centered frame so grid/beams look consistent on ultrawide screens */
+.lumina-overlay__frame {
+  position: absolute;
+  inset: 0;
+  width: min(1120px, 100%);
+  margin: 0 auto;
+}
+
+.lumina-overlay__grid {
+  position: absolute;
+  inset: 0;
+  opacity: 0.62;
+  background:
+    /* right border */
+    linear-gradient(to right, transparent calc(100% - 1px), var(--lumina-line) calc(100% - 1px)),
+    /* 5-column vertical lines */
+    linear-gradient(to right, var(--lumina-line) 1px, transparent 1px);
+  background-size: 100% 100%, 20% 100%;
+  background-repeat: no-repeat, repeat-x;
+}
+
+.lumina-overlay__vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to bottom, rgba(5, 5, 5, 0.0), rgba(5, 5, 5, 0.22) 30%, rgba(5, 5, 5, 0.55) 70%, rgba(5, 5, 5, 0.0)),
+    radial-gradient(ellipse at 50% 18%, rgba(249, 115, 22, 0.10), rgba(5, 5, 5, 0) 58%);
+  mix-blend-mode: screen;
+  opacity: 0.85;
+}
+
+@keyframes lumina-beam-fall {
+  0% {
+    transform: translateY(-120%);
+    opacity: 0;
+  }
+  6% {
+    opacity: 0.55;
+  }
+  55% {
+    opacity: 1;
+  }
+  94% {
+    opacity: 0.45;
+  }
+  100% {
+    transform: translateY(140vh);
+    opacity: 0;
+  }
+}
+
+.lumina-overlay__beam {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  will-change: transform, opacity;
+  left: var(--x, 50%);
+  height: var(--h, 260px);
+  opacity: var(--o, 1);
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgba(249, 115, 22, var(--strength, 0.7)),
+    transparent
+  );
+  animation-name: lumina-beam-fall;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-duration: var(--dur, 7s);
+  animation-delay: var(--delay, 0s);
+}
+
+/* Subtle bloom around each beam so it reads as "light rain" */
+.lumina-overlay__beam::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: radial-gradient(
+    circle,
+    rgba(249, 115, 22, calc(var(--strength, 0.7) * 0.25)),
+    rgba(249, 115, 22, 0) 62%
+  );
+  filter: blur(2px);
+  opacity: 0.9;
+}
+
+/* Subtle dashed center line hint */
+.lumina-overlay__centerline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      rgba(249, 115, 22, 0.0) 0px,
+      rgba(249, 115, 22, 0.0) 10px,
+      rgba(249, 115, 22, 0.18) 10px,
+      rgba(249, 115, 22, 0.18) 16px
+    );
+  opacity: 0.75;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lumina-overlay__beam {
+    animation: none !important;
+    display: none;
+  }
+}

@@ -13,6 +13,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" />
   <link rel="stylesheet" href="style.css?v=20260218_001" />
+  <link rel="stylesheet" href="lumina-theme.css?v=20260301_004" />
   <style>
     .auth-layout {
       min-height: 100vh;
@@ -163,6 +164,27 @@
 </head>
 
 <body>
+  <!-- Lumina decorative overlay (safe: pointer-events none; behind app) -->
+  <div class="lumina-overlay" aria-hidden="true">
+    <div class="lumina-overlay__frame">
+      <div class="lumina-overlay__grid"></div>
+      <!-- Light rain (vertical beams) -->
+      <i class="lumina-overlay__beam" style="--x: 14%; --h: 220px; --dur: 6.4s; --delay: -0.8s; --strength: 0.55;"></i>
+      <i class="lumina-overlay__beam" style="--x: 22%; --h: 360px; --dur: 7.6s; --delay: -3.2s; --strength: 0.65;"></i>
+      <i class="lumina-overlay__beam" style="--x: 30%; --h: 260px; --dur: 6.9s; --delay: -1.7s; --strength: 0.58;"></i>
+      <i class="lumina-overlay__beam" style="--x: 38%; --h: 520px; --dur: 8.8s; --delay: -5.1s; --strength: 0.78;"></i>
+      <i class="lumina-overlay__beam" style="--x: 46%; --h: 240px; --dur: 6.1s; --delay: -2.4s; --strength: 0.52;"></i>
+      <i class="lumina-overlay__beam" style="--x: 54%; --h: 420px; --dur: 9.2s; --delay: -6.0s; --strength: 0.82;"></i>
+      <i class="lumina-overlay__beam" style="--x: 62%; --h: 280px; --dur: 6.7s; --delay: -0.4s; --strength: 0.60;"></i>
+      <i class="lumina-overlay__beam" style="--x: 70%; --h: 480px; --dur: 8.1s; --delay: -4.3s; --strength: 0.74;"></i>
+      <i class="lumina-overlay__beam" style="--x: 78%; --h: 230px; --dur: 6.0s; --delay: -1.1s; --strength: 0.50;"></i>
+      <i class="lumina-overlay__beam" style="--x: 86%; --h: 390px; --dur: 7.8s; --delay: -3.8s; --strength: 0.70;"></i>
+      <i class="lumina-overlay__beam" style="--x: 92%; --h: 260px; --dur: 6.6s; --delay: -2.0s; --strength: 0.56;"></i>
+      <div class="lumina-overlay__centerline"></div>
+    </div>
+    <div class="lumina-overlay__vignette"></div>
+  </div>
+
   <main class="auth-layout" aria-label="Autenticação">
     <section class="auth-card">
       <div class="auth-brand">
@@ -220,17 +242,35 @@
 
       function resolveBackendBase() {
         try {
+          function normalizeBase(candidate) {
+            var raw = String(candidate || "").trim();
+            if (!raw) return "";
+            try {
+              var u = new URL(raw);
+              // Windows/Chrome gotcha: `localhost` may resolve to IPv6 (::1) while uvicorn is often
+              // bound only to 127.0.0.1. Also, `0.0.0.0` is a bind-all address (not a valid client target).
+              var host = String(u.hostname || "").toLowerCase();
+              var port = String(u.port || "");
+              if (u.protocol === "http:" && port === "8000" && (host === "localhost" || host === "0.0.0.0")) {
+                u.hostname = "127.0.0.1";
+                return u.origin;
+              }
+              return u.origin;
+            } catch (e) {
+              return raw;
+            }
+          }
+
           var url = new URL(window.location.href);
           var qp = String(url.searchParams.get("api") || "").trim();
           if (qp) {
-            localStorage.setItem(BACKEND_BASE_KEY, qp);
-            return qp;
+            var normalized = normalizeBase(qp) || qp;
+            localStorage.setItem(BACKEND_BASE_KEY, normalized);
+            return normalized;
           }
-          var saved = String(localStorage.getItem(BACKEND_BASE_KEY) || "").trim();
-          if (saved === "http://localhost:8000") {
-            saved = "http://127.0.0.1:8000";
-            localStorage.setItem(BACKEND_BASE_KEY, saved);
-          }
+          var savedRaw = String(localStorage.getItem(BACKEND_BASE_KEY) || "").trim();
+          var saved = normalizeBase(savedRaw) || savedRaw;
+          if (saved && saved !== savedRaw) localStorage.setItem(BACKEND_BASE_KEY, saved);
           return saved || BACKEND_DEFAULT;
         } catch (e) {
           return BACKEND_DEFAULT;
@@ -262,6 +302,8 @@
         var out = [];
         var current = String(base || "").trim();
         if (current) out.push(current);
+        // Always include the common dev default as a fallback (helps when a stale `localhost` base is saved).
+        if (out.indexOf(BACKEND_DEFAULT) === -1) out.push(BACKEND_DEFAULT);
         var alt = current.replace("127.0.0.1:8000", "127.0.0.1:8001").replace("localhost:8000", "127.0.0.1:8001");
         if (alt && out.indexOf(alt) === -1) out.push(alt);
         if (out.indexOf("http://127.0.0.1:8001") === -1) out.push("http://127.0.0.1:8001");
