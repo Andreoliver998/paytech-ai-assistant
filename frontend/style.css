@@ -1562,3 +1562,44 @@ html[data-theme="light"] .chat::-webkit-scrollbar-thumb {
     padding: var(--space-24) var(--space-16) var(--space-32);
   }
 }
+
+/* ===== UI (surgical): hide top/bottom bars =====
+   Keep DOM nodes and IDs for JS; adjust visuals only. */
+.topbar {
+  display: none !important;
+}
+
+footer.composer {
+  position: fixed;
+  left: calc(var(--sidebar-w) + var(--space-16));
+  right: var(--space-16);
+  bottom: var(--space-16);
+  z-index: 80;
+  background: transparent !important;
+  border-top: 0 !important;
+  backdrop-filter: none !important;
+  padding: 0 !important;
+  pointer-events: none;
+}
+
+.app.sb-collapsed footer.composer {
+  left: calc(72px + var(--space-16));
+}
+
+footer.composer .composer-inner {
+  padding: 0 !important;
+  margin: 0 auto !important;
+  pointer-events: auto;
+}
+
+/* Prevent messages from being hidden behind the floating composer */
+.chat .thread {
+  padding-bottom: calc(var(--space-64) + 104px);
+}
+
+@media (max-width: 900px) {
+  footer.composer {
+    left: var(--space-16);
+    right: var(--space-16);
+  }
+}
