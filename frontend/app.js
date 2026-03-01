@@ -64,20 +64,39 @@ window.addEventListener(
 
 function resolveBackendBase() {
   try {
+    function normalizeBase(candidate) {
+      const raw = String(candidate || "").trim();
+      if (!raw) return "";
+      try {
+        const u = new URL(raw);
+        // Windows/Chrome gotcha: `localhost` may resolve to IPv6 (::1) while uvicorn is often
+        // bound only to 127.0.0.1. Also, `0.0.0.0` is a bind-all address (not a valid client target).
+        const host = String(u.hostname || "").toLowerCase();
+        const port = String(u.port || "");
+        if (u.protocol === "http:" && port === "8000" && (host === "localhost" || host === "0.0.0.0")) {
+          u.hostname = "127.0.0.1";
+          return u.origin;
+        }
+        return u.origin;
+      } catch {
+        return raw;
+      }
+    }
+
     const url = new URL(window.location.href);
     const qp = (url.searchParams.get("api") || "").trim();
     if (qp) {
-      localStorage.setItem(BACKEND_BASE_KEY, qp);
-      return qp;
+      const normalized = normalizeBase(qp) || qp;
+      localStorage.setItem(BACKEND_BASE_KEY, normalized);
+      return normalized;
     }
-    const saved = (localStorage.getItem(BACKEND_BASE_KEY) || "").trim();
+    const savedRaw = (localStorage.getItem(BACKEND_BASE_KEY) || "").trim();
+    const saved = normalizeBase(savedRaw) || savedRaw;
     // Windows gotcha: `localhost` often resolves to IPv6 (::1) while uvicorn is frequently
     // bound only to 127.0.0.1. Non-streaming requests may appear to work intermittently,
     // but streaming is much more sensitive. Normalize the common default to IPv4.
-    if (saved === "http://localhost:8000") {
-      const normalized = "http://127.0.0.1:8000";
-      try { localStorage.setItem(BACKEND_BASE_KEY, normalized); } catch { }
-      return normalized;
+    if (saved && saved !== savedRaw) {
+      try { localStorage.setItem(BACKEND_BASE_KEY, saved); } catch { }
     }
     return saved || BACKEND_DEFAULT;
   } catch {
@@ -820,7 +839,9 @@ async function pingBackendHealth(timeoutMs = 900) {
   _healthLastBase = base;
   _healthInFlight = (async () => {
     try {
-      const res = await authFetch(`${BACKEND_BASE}/health`, { method: "GET", signal: ac.signal });
+      // `/health` does not require auth; using plain fetch avoids CORS preflight edge cases
+      // when an Authorization header is present.
+      const res = await fetch(`${BACKEND_BASE}/health`, { method: "GET", signal: ac.signal });
       return !!res.ok;
     } catch {
       return false;
@@ -845,7 +866,13 @@ function getAlternateBackendBases() {
   const ip = "http://127.0.0.1:8000";
   const alt = "http://127.0.0.1:8001";
 
-  if (cur) bases.push(cur);
+  // Prefer the default dev port (8000). If the current base is 8001, try 8000 first.
+  if (cur && /:(8001)$/.test(cur)) {
+    bases.push(ip);
+    bases.push(cur);
+  } else if (cur) {
+    bases.push(cur);
+  }
   if (!bases.includes(ip)) bases.push(ip);
   if (!bases.includes(alt)) bases.push(alt);
 
@@ -853,22 +880,27 @@ function getAlternateBackendBases() {
 }
 
 async function ensureBackendBaseOnline() {
+  const prev = BACKEND_BASE;
   const candidates = getAlternateBackendBases();
-  for (const base of candidates) {
-    const prev = BACKEND_BASE;
-    BACKEND_BASE = base;
-    const ok = await pingBackendHealth(900);
-    if (ok) {
-      backendOnline = true;
-      try {
-        localStorage.setItem(BACKEND_BASE_KEY, base);
-      } catch { }
-      if (prev !== base) toast(`Backend conectado: ${base}`, { ms: 1800 });
-      return true;
+  try {
+    for (const base of candidates) {
+      BACKEND_BASE = base;
+      const ok = await pingBackendHealth(900);
+      if (ok) {
+        backendOnline = true;
+        try {
+          localStorage.setItem(BACKEND_BASE_KEY, base);
+        } catch { }
+        if (prev !== base) toast(`Backend conectado: ${base}`, { ms: 1800 });
+        return true;
+      }
     }
+    backendOnline = false;
+    return false;
+  } finally {
+    // If no candidate was reachable, restore previous base (avoid getting stuck on the last tried one).
+    if (backendOnline === false) BACKEND_BASE = prev;
   }
-  backendOnline = false;
-  return false;
 }
 
 function setTopbarStatus(text) {
@@ -999,13 +1031,11 @@ function applyTheme(theme, { persist } = { persist: false }) {
 }
 
 function initTheme() {
-  applyTheme(readStoredTheme() || getSystemTheme(), { persist: false });
+  // Lock theme to dark (no light-mode toggle).
   try {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    mq.addEventListener?.("change", () => {
-      if (!readStoredTheme()) applyTheme(getSystemTheme(), { persist: false });
-    });
+    localStorage.removeItem(THEME_KEY);
   } catch { }
+  applyTheme("dark", { persist: false });
 }
 
 // =============================
@@ -2444,6 +2474,7 @@ async function sendMessage() {
   let watchdogTimer = 0;
   let watchdogFallback = false;
   let emptyStreamDone = false;
+  let lastSseAt = Date.now();
 
   let uploadedDocsForThisMessage = false;
 
@@ -2478,17 +2509,7 @@ async function sendMessage() {
       try { currentAbortController?.abort?.(); } catch { }
 
       // Hotfix local: if 8000 is an old/stale backend instance, prefer 8001 for fallback.
-      try {
-        const baseNow = String(BACKEND_BASE || "").trim();
-        const alt = "http://127.0.0.1:8001";
-        if (/:(8000)$/.test(baseNow) && baseNow !== alt) {
-          const h = await fetch(`${alt}/health`, { method: "GET" });
-          if (h && h.ok) {
-            BACKEND_BASE = alt;
-            try { localStorage.setItem(BACKEND_BASE_KEY, alt); } catch { }
-          }
-        }
-      } catch { }
+      // NOTE: Do not force port switching here; backend selection is handled by ensureBackendBaseOnline().
 
       // Before falling back to non-stream /chat, try to ensure we are pointing at a reachable backend.
       // This mitigates common local issues (localhost IPv6 ::1 vs uvicorn bound to 127.0.0.1, reloads, etc.).
@@ -2710,15 +2731,27 @@ async function sendMessage() {
 
     const contentType = String(res.headers?.get?.("content-type") || "").toLowerCase();
 
-    watchdogTimer = window.setTimeout(async () => {
-      await runChatFallback("Sem resposta no streaming. Usando fallback…");
-    }, 12000);
+    // Watchdog: only fallback if we haven't received *any* SSE traffic for a while.
+    // Some replies spend time in planner/tools; during that phase, the backend still emits `status` events.
+    // Falling back too early causes needless aborts and can "stick" the UI on old fallback bases.
+    lastSseAt = Date.now();
+    watchdogTimer = window.setInterval(async () => {
+      try {
+        if (watchdogFallback) return;
+        if (streamingMsg?.hasFirstChunk) return;
+        const idleMs = Date.now() - lastSseAt;
+        if (idleMs > 22000) {
+          await runChatFallback("Sem resposta no streaming. Usando fallback…");
+        }
+      } catch { }
+    }, 1500);
 
     if (contentType.includes("text/event-stream")) {
       let sawAnyDelta = false;
 
       await readSseStream(reader, {
         onStatus: (st) => {
+          lastSseAt = Date.now();
           const phase = String(st?.phase || "").trim().toLowerCase();
           ptLog("sse:status", { phase });
 
@@ -2745,6 +2778,7 @@ async function sendMessage() {
           }
         },
         onDelta: (t) => {
+          lastSseAt = Date.now();
           if (!sawAnyDelta) {
             sawAnyDelta = true;
             ptLog("sse:delta:first", { len: String(t || "").length, sample: String(t || "").slice(0, 30) });
@@ -2754,11 +2788,13 @@ async function sendMessage() {
         onSources: (p) => setStreamingSources(p?.items),
         onArtifact: (a) => pushStreamingArtifact(a),
         onError: (e) => {
+          lastSseAt = Date.now();
           ptLog("sse:error", { msg: String(e?.message || e || "") });
           clearTopbarStatus();
           finalizeStreaming({ ok: false, errorMessage: e?.message || "Erro no streaming." });
         },
         onDone: () => {
+          lastSseAt = Date.now();
           ptLog("sse:done", { sawAnyDelta });
           if (!streamingMsg?.hasFirstChunk) {
             emptyStreamDone = true;
@@ -2831,7 +2867,7 @@ async function sendMessage() {
   } finally {
     if (watchdogTimer) {
       try {
-        clearTimeout(watchdogTimer);
+        clearInterval(watchdogTimer);
       } catch { }
       watchdogTimer = 0;
     }
@@ -3613,11 +3649,7 @@ function bindEvents() {
     } catch { }
   });
 
-  el.themeToggle?.addEventListener?.("click", () => {
-    const current = document.documentElement.getAttribute("data-theme") || "light";
-    applyTheme(current === "dark" ? "light" : "dark", { persist: true });
-    toast("Tema atualizado.");
-  });
+  // Theme toggle removed (dark-only UI).
 
   el.responseModeBtn?.addEventListener?.("click", (e) => {
     e?.preventDefault?.();
