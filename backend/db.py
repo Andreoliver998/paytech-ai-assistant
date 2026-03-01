@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, text, event
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 from .settings import settings
@@ -18,9 +18,25 @@ DB_URL = settings.PAYTECH_DB_URL or f"sqlite:///{(DATA_DIR / 'paytech.db').as_po
 
 connect_args = {}
 if DB_URL.startswith("sqlite:///"):
-    connect_args = {"check_same_thread": False}
+    # `timeout` is the SQLite busy timeout (seconds). Helps avoid indefinite blocking on locks.
+    connect_args = {"check_same_thread": False, "timeout": 5.0}
 
 engine = create_engine(DB_URL, echo=False, connect_args=connect_args)
+
+# SQLite concurrency tuning: WAL allows concurrent reads while a writer is active.
+if DB_URL.startswith("sqlite:///"):
+    @event.listens_for(engine, "connect")
+    def _sqlite_on_connect(dbapi_connection, _connection_record):
+        try:
+            cur = dbapi_connection.cursor()
+            cur.execute("PRAGMA journal_mode=WAL;")
+            cur.execute("PRAGMA synchronous=NORMAL;")
+            cur.execute("PRAGMA busy_timeout=5000;")
+            cur.close()
+        except Exception:
+            # Best-effort; never block app startup due to pragma issues.
+            pass
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 

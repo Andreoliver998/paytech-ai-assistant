@@ -14,6 +14,7 @@ from ..settings import settings
 
 
 EMBED_TIMEOUT_S = 1.2
+_EMBED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="embed")
 
 
 def _safe_json_loads(s: str, default: Any):
@@ -42,10 +43,16 @@ def _try_embed(texts: List[str]) -> List[List[float]]:
     if not texts:
         return []
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(embed_texts, texts, settings.OPENAI_EMBED_MODEL)
-            return fut.result(timeout=EMBED_TIMEOUT_S) or []
+        # IMPORTANT: Do NOT use a ThreadPoolExecutor context manager here.
+        # `shutdown(wait=True)` would block until the worker finishes, defeating the timeout
+        # and causing SSE to get stuck in "thinking".
+        fut = _EMBED_EXECUTOR.submit(embed_texts, texts, settings.OPENAI_EMBED_MODEL)
+        return fut.result(timeout=EMBED_TIMEOUT_S) or []
     except Exception:
+        try:
+            fut.cancel()  # best-effort; may be running already
+        except Exception:
+            pass
         return []
 
 

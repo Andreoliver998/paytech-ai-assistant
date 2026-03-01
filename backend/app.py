@@ -114,7 +114,7 @@ app.add_middleware(
     # por bloqueio de CORS. (Em PROD isso fica desabilitado.)
     allow_origins=origins if origins else [],
     allow_origin_regex=(
-        r"^(null|https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?)$"
+        r"^(null|https?://(localhost|127\.0\.0\.1)(:\d+)?)$"
         if settings.ENV.lower() == "dev"
         else None
     ),
